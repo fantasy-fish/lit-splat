@@ -159,6 +159,7 @@ let camera = cameras[0];
 
 function getProjectionMatrix(fx, fy, width, height) {
     // Returns a matrix in column-major order.
+    // TODO: Why does this look so different from the OpenGL projection matrix?
     const znear = 0.2;
     const zfar = 200;
     return [
@@ -855,8 +856,8 @@ void main () {
 
     float zfar = 200.;
     float znear = 0.2;
-    float zw = -(zfar + znear)/(znear - zfar);
-    float zb = 2.*zfar*znear/(znear - zfar);
+    float zw = zfar/(zfar - znear);
+    float zb = -zfar*znear/(zfar - znear);
 
     vec4 clip_p0 = clip_w0 * vec4(ndc0, zw, 1.) + vec4(0., 0., zb, 0.);
     vec4 clip_p1 = clip_w1 * vec4(ndc1, zw, 1.) + vec4(0., 0., zb, 0.);
