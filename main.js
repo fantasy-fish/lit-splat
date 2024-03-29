@@ -299,7 +299,7 @@ function translate4(a, x, y, z) {
 
 function createWorker(self) {
     let buffer;
-    let vertexCount = 0;
+    let gaussianCount = 0;
     let viewProj;
     // 6*4 + 4 + 4 = 8*4
     // XYZ - Position (Float32)
@@ -309,7 +309,7 @@ function createWorker(self) {
     const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
     let lastProj = [];
     let depthIndex = new Uint32Array();
-    let lastVertexCount = 0;
+    let lastGaussianCount = 0;
 
     var _floatView = new Float32Array(1);
     var _int32View = new Int32Array(_floatView.buffer);
@@ -353,7 +353,7 @@ function createWorker(self) {
         const u_buffer = new Uint8Array(buffer);
 
         var texwidth = 1024 * 2; // Set to your desired width
-        var texheight = Math.ceil((2 * vertexCount) / texwidth); // Set to your desired height
+        var texheight = Math.ceil((2 * gaussianCount) / texwidth); // Set to your desired height
         var texdata = new Uint32Array(texwidth * texheight * 4); // 4 components per pixel (RGBA)
         var texdata_c = new Uint8Array(texdata.buffer);
         var texdata_f = new Float32Array(texdata.buffer);
@@ -362,7 +362,7 @@ function createWorker(self) {
         // With a little bit more foresight perhaps this texture file
         // should have been the native format as it'd be very easy to
         // load it into webgl.
-        for (let i = 0; i < vertexCount; i++) {
+        for (let i = 0; i < gaussianCount; i++) {
             // x, y, z
             texdata_f[8 * i + 0] = f_buffer[8 * i + 0];
             texdata_f[8 * i + 1] = f_buffer[8 * i + 1];
@@ -422,7 +422,7 @@ function createWorker(self) {
     function runSort(viewProj) {
         if (!buffer) return;
         const f_buffer = new Float32Array(buffer);
-        if (lastVertexCount == vertexCount) {
+        if (lastGaussianCount == gaussianCount) {
             let dot =
                 lastProj[2] * viewProj[2] +
                 lastProj[6] * viewProj[6] +
@@ -432,14 +432,14 @@ function createWorker(self) {
             }
         } else {
             generateTexture();
-            lastVertexCount = vertexCount;
+            lastGaussianCount = gaussianCount;
         }
 
         console.time("sort");
         let maxDepth = -Infinity;
         let minDepth = Infinity;
-        let sizeList = new Int32Array(vertexCount);
-        for (let i = 0; i < vertexCount; i++) {
+        let sizeList = new Int32Array(gaussianCount);
+        for (let i = 0; i < gaussianCount; i++) {
             let depth =
                 ((viewProj[2] * f_buffer[8 * i + 0] +
                     viewProj[6] * f_buffer[8 * i + 1] +
@@ -454,22 +454,22 @@ function createWorker(self) {
         // This is a 16 bit single-pass counting sort
         let depthInv = (256 * 256) / (maxDepth - minDepth);
         let counts0 = new Uint32Array(256 * 256);
-        for (let i = 0; i < vertexCount; i++) {
+        for (let i = 0; i < gaussianCount; i++) {
             sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
             counts0[sizeList[i]]++;
         }
         let starts0 = new Uint32Array(256 * 256);
         for (let i = 1; i < 256 * 256; i++)
             starts0[i] = starts0[i - 1] + counts0[i - 1];
-        depthIndex = new Uint32Array(vertexCount);
-        for (let i = 0; i < vertexCount; i++)
+        depthIndex = new Uint32Array(gaussianCount);
+        for (let i = 0; i < gaussianCount; i++)
             depthIndex[starts0[sizeList[i]]++] = i;
 
         console.timeEnd("sort");
-        console.log(`sorted ${vertexCount} vertices`);
+        console.log(`sorted ${gaussianCount} gaussians`);
 
         lastProj = viewProj;
-        self.postMessage({ depthIndex, viewProj, vertexCount }, [
+        self.postMessage({ depthIndex, viewProj, gaussianCount }, [
             depthIndex.buffer,
         ]);
     }
@@ -482,8 +482,8 @@ function createWorker(self) {
         const header_end_index = header.indexOf(header_end);
         if (header_end_index < 0)
             throw new Error("Unable to read .ply file header");
-        const vertexCount = parseInt(/element vertex (\d+)\n/.exec(header)[1]);
-        console.log("Vertex Count", vertexCount);
+        const gaussianCount = parseInt(/element vertex (\d+)\n/.exec(header)[1]);
+        console.log("Gaussian Count", gaussianCount);
         let row_offset = 0,
             offsets = {},
             types = {};
@@ -527,9 +527,9 @@ function createWorker(self) {
         );
 
         console.time("calculate importance");
-        let sizeList = new Float32Array(vertexCount);
-        let sizeIndex = new Uint32Array(vertexCount);
-        for (row = 0; row < vertexCount; row++) {
+        let sizeList = new Float32Array(gaussianCount);
+        let sizeIndex = new Uint32Array(gaussianCount);
+        for (row = 0; row < gaussianCount; row++) {
             sizeIndex[row] = row;
             if (!types["scale_0"]) continue;
             const size =
@@ -551,10 +551,10 @@ function createWorker(self) {
         // RGBA - colors (uint8)
         // IJKL - quaternion/rot (uint8)
         const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
-        const buffer = new ArrayBuffer(rowLength * vertexCount);
+        const buffer = new ArrayBuffer(rowLength * gaussianCount);
 
         console.time("build buffer");
-        for (let j = 0; j < vertexCount; j++) {
+        for (let j = 0; j < gaussianCount; j++) {
             row = sizeIndex[j];
 
             const position = new Float32Array(buffer, j * rowLength, 3);
@@ -638,16 +638,16 @@ function createWorker(self) {
     let sortRunning;
     self.onmessage = (e) => {
         if (e.data.ply) {
-            vertexCount = 0;
+            gaussianCount = 0;
             runSort(viewProj);
             buffer = processPlyBuffer(e.data.ply);
-            vertexCount = Math.floor(buffer.byteLength / rowLength);
+            gaussianCount = Math.floor(buffer.byteLength / rowLength);
             postMessage({ buffer: buffer });
         } else if (e.data.buffer) {
             buffer = e.data.buffer;
-            vertexCount = e.data.vertexCount;
-        } else if (e.data.vertexCount) {
-            vertexCount = e.data.vertexCount;
+            gaussianCount = e.data.gaussianCount;
+        } else if (e.data.gaussianCount) {
+            gaussianCount = e.data.gaussianCount;
         } else if (e.data.view) {
             viewProj = e.data.view;
             throttledSort();
@@ -655,7 +655,7 @@ function createWorker(self) {
     };
 }
 
-const vertexShaderSource = `
+const gaussianVertexSource = `
 #version 300 es
 precision highp float;
 precision highp int;
@@ -749,6 +749,52 @@ void main () {
         + position.y * minorAxis / viewport, 0.0, 1.0);
 
 }
+`.trim();
+
+const overlayVertexSource = `
+#version 300 es
+precision highp float;
+
+uniform mat4 projection, view;
+uniform vec3 worldCameraPosition;
+uniform vec3 worldCameraUp;
+uniform vec2 size;
+
+in vec2 uv;
+in vec3 worldCenter;
+
+out vec2 vUv;
+
+void main () {
+    vec3 worldP = worldCenter;
+    // Overlay quad should always face the camera
+    vec3 dirToCamera = normalize(worldCameraPosition - worldP);
+    vec3 up = worldCameraUp;
+    vec3 right = normalize(cross(up, dirToCamera));
+
+    vec4 world_p = vec4(worldP, 1.) + vec4(size.x * right * (uv.x-0.5) + size.y * up * (uv.y-0.5), 0);
+    vec4 eye_p = view * world_p;
+    vec4 clip_p = projection * eye_p;
+
+    vUv = uv;
+    gl_Position = clip_p;
+}
+`.trim();
+
+const overlayFragmentSource = `
+#version 300 es
+precision highp float;
+
+uniform sampler2D overlayTexture;
+
+in vec2 vUv;
+
+out vec4 fragColor;
+
+void main () {
+    fragColor = texture(overlayTexture, vUv);
+}
+
 `.trim();
 
 const colorFragmentSource = `
@@ -936,11 +982,37 @@ async function main() {
         };
     }
 
-    const vertexShader = gl.createShader(gl.VERTEX_SHADER);
-    gl.shaderSource(vertexShader, vertexShaderSource);
-    gl.compileShader(vertexShader);
-    if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS))
-        console.error(gl.getShaderInfoLog(vertexShader));
+    var lightPositions = new Float32Array(16 * 3);
+    var numLights = 1;
+
+    const indexBuffer = gl.createBuffer();
+
+    const GAUSSIAN_QUAD_VERTICES = new Float32Array([
+        -2, -2,
+        2, -2,
+        2, 2,
+        -2, 2
+    ]);
+    const gaussianQuadVertexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, GAUSSIAN_QUAD_VERTICES, gl.STATIC_DRAW);
+
+    const OVERLAY_QUAD_UVS = new Float32Array([
+        0, 1,
+        1, 1,
+        1, 0,
+        0, 0
+    ]);
+    const overlayQuadUVBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, OVERLAY_QUAD_UVS, gl.STATIC_DRAW);
+
+    const gaussianVertexShader = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(gaussianVertexShader, gaussianVertexSource);
+    gl.compileShader(gaussianVertexShader);
+    if (!gl.getShaderParameter(gaussianVertexShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(gaussianVertexShader));
+    }
 
     const colorFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
     gl.shaderSource(colorFragmentShader, colorFragmentSource);
@@ -956,8 +1028,22 @@ async function main() {
         console.error(gl.getShaderInfoLog(lightingFragmentShader));
     }
 
+    const overlayVertexShader = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(overlayVertexShader, overlayVertexSource);
+    gl.compileShader(overlayVertexShader);
+    if (!gl.getShaderParameter(overlayVertexShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(overlayVertexShader));
+    }
+
+    const overlayFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(overlayFragmentShader, overlayFragmentSource);
+    gl.compileShader(overlayFragmentShader);
+    if (!gl.getShaderParameter(overlayFragmentShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(overlayFragmentShader));
+    }
+
     const colorProgram = gl.createProgram();
-    gl.attachShader(colorProgram, vertexShader);
+    gl.attachShader(colorProgram, gaussianVertexShader);
     gl.attachShader(colorProgram, colorFragmentShader);
     gl.linkProgram(colorProgram);
     gl.useProgram(colorProgram);
@@ -978,7 +1064,7 @@ async function main() {
     };
 
     const lightingProgram = gl.createProgram();
-    gl.attachShader(lightingProgram, vertexShader);
+    gl.attachShader(lightingProgram, gaussianVertexShader);
     gl.attachShader(lightingProgram, lightingFragmentShader);
     gl.linkProgram(lightingProgram);
     gl.useProgram(lightingProgram);
@@ -1004,55 +1090,55 @@ async function main() {
         a_index: gl.getAttribLocation(lightingProgram, "index"),
     };
 
+    const overlayProgram = gl.createProgram();
+    gl.attachShader(overlayProgram, overlayVertexShader);
+    gl.attachShader(overlayProgram, overlayFragmentShader);
+    gl.linkProgram(overlayProgram);
+    gl.useProgram(overlayProgram);
+    if (!gl.getProgramParameter(overlayProgram, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(overlayProgram));
+    }
+    const overlayProgramUniforms = {
+        u_texture: gl.getUniformLocation(overlayProgram, "overlayTexture"),
+        u_projection: gl.getUniformLocation(overlayProgram, "projection"),
+        u_view: gl.getUniformLocation(overlayProgram, "view"),
+        u_worldCameraPosition: gl.getUniformLocation(overlayProgram, "worldCameraPosition"),
+        u_worldCameraUp: gl.getUniformLocation(overlayProgram, "worldCameraUp"),
+        u_size: gl.getUniformLocation(overlayProgram, "size"),
+    };
+    const overlayProgramAttributes = {
+        a_uv: gl.getAttribLocation(overlayProgram, "uv"),
+        a_worldCenter: gl.getAttribLocation(overlayProgram, "worldCenter"),
+    };
+    // Setup attributes for overlay center positions and allocate space for an array of light overlays
+    const lightOverlayCenterBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
+    // Just allocate, don't upload yet
+    gl.bufferData(gl.ARRAY_BUFFER, lightPositions.byteLength, gl.DYNAMIC_DRAW); // DYNAMIC_DRAW because we will change this often
+
     gl.disable(gl.DEPTH_TEST); // Disable depth testing
 
     // Enable blending
     gl.enable(gl.BLEND);
-    // See eqn. 3 of the 3D gaussian splats paper for alpha blending.
-    // Note in the fragment shader we also pre-multiply the color by the source alpha.
-    gl.blendFunc(
-        gl.ONE_MINUS_DST_ALPHA,
-        gl.ONE,
-    );
-    gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
-
-    // positions
-    const triangleVertices = new Float32Array([-2, -2, 2, -2, 2, 2, -2, 2]);
-    const vertexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, triangleVertices, gl.STATIC_DRAW);
-
-    gl.enableVertexAttribArray(colorProgramAttributes.a_position);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
-
-    gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.vertexAttribPointer(lightingProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
 
     var gaussianDataTexture = createTextureObject(gl.NEAREST);
-    gl.bindTexture(gl.TEXTURE_2D, gaussianDataTexture.texture);
 
     var depthWidth = 640;
     var depthHeight = 480;
     let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
-    gl.uniform1i(lightingProgramUniforms.u_depthTextureLocation, depthFBO.texId);
+
+    const lightOverlayTexture = createTextureObject(gl.LINEAR);
+    const image = new Image();
+    image.src = "./lightbulb.png";
+    image.onload = function() {
+        gl.activeTexture(gl.TEXTURE0 + lightOverlayTexture.texId);
+        gl.bindTexture(gl.TEXTURE_2D, lightOverlayTexture.texture);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    };
 
     var currentMode = MODES.COLOR;
-    var lightPositions = new Float32Array(16 * 3);
-    var numLights = 0;
-
-    const indexBuffer = gl.createBuffer();
-
-    gl.enableVertexAttribArray(colorProgramAttributes.a_index);
-    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-    gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
-    gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
-
-    gl.enableVertexAttribArray(lightingProgramAttributes.a_index);
-    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-    gl.vertexAttribIPointer(lightingProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
-    gl.vertexAttribDivisor(lightingProgramAttributes.a_index, 1);
 
     const resize = () => {
         projectionMatrix = getProjectionMatrix(
@@ -1100,7 +1186,7 @@ async function main() {
             const { depthIndex, viewProj } = e.data;
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
             gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
-            vertexCount = e.data.vertexCount;
+            gaussianCount = e.data.gaussianCount;
         }
     };
 
@@ -1350,7 +1436,7 @@ async function main() {
     );
 
     let jumpDelta = 0;
-    let vertexCount = 0;
+    let gaussianCount = 0;
 
     let lastFrame = 0;
     let avgFps = 0;
@@ -1527,17 +1613,34 @@ async function main() {
         gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([camera.fx, camera.fy]));
         gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([innerWidth, innerHeight]));
         gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, projectionMatrix);
-        if (vertexCount > 0) {
+        // See eqn. 3 of the 3D gaussian splats paper for alpha blending.
+        // Note in the fragment shader we also pre-multiply the color by the source alpha.
+        gl.blendFunc(
+            gl.ONE_MINUS_DST_ALPHA,
+            gl.ONE,
+        );
+        gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+        if (gaussianCount > 0) {
             document.getElementById("spinner").style.display = "none";
-            gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, actualViewMatrix);
 
+            gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, actualViewMatrix);
             gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
+
+            gl.enableVertexAttribArray(colorProgramAttributes.a_position);
+            gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
+            gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(colorProgramAttributes.a_index);
+            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+            gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+            gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
+
             gl.bindFramebuffer(gl.FRAMEBUFFER, depthFBO.fbo);
             gl.viewport(0, 0, depthWidth, depthHeight);
             gl.clear(gl.COLOR_BUFFER_BIT);
-            gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+            gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
 
             if (currentMode == MODES.LIGHTING) {
+                // draw scene with lighting
                 gl.useProgram(lightingProgram);
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_view, false, actualViewMatrix);
                 gl.uniform1i(lightingProgramUniforms.u_textureLocation, gaussianDataTexture.texId);
@@ -1551,16 +1654,50 @@ async function main() {
                 gl.uniform3fv(lightingProgramUniforms.u_lightPositions, lightPositions);
                 gl.uniform1i(lightingProgramUniforms.u_numLights, numLights);
 
+                gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
+                gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
+                gl.vertexAttribPointer(lightingProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(lightingProgramAttributes.a_index);
+                gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+                gl.vertexAttribIPointer(lightingProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+                gl.vertexAttribDivisor(lightingProgramAttributes.a_index, 1);
+
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
                 gl.clear(gl.COLOR_BUFFER_BIT);
-                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
+
+                // draw overlays
+                gl.useProgram(overlayProgram);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, lightPositions);
+
+                gl.uniform1i(overlayProgramUniforms.u_texture, lightOverlayTexture.texId);
+                gl.uniformMatrix4fv(overlayProgramUniforms.u_projection, false, projectionMatrix);
+                gl.uniformMatrix4fv(overlayProgramUniforms.u_view, false, actualViewMatrix);
+                gl.uniform3fv(overlayProgramUniforms.u_worldCameraPosition, new Float32Array([inv2[12], inv2[13], inv2[14]]));
+                gl.uniform3fv(overlayProgramUniforms.u_worldCameraUp, new Float32Array([inv2[4], inv2[5], inv2[6]]));
+                gl.uniform2fv(overlayProgramUniforms.u_size, new Float32Array([0.2, 0.2]));
+                // Use normal over blending
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+                gl.blendEquation(gl.FUNC_ADD);
+
+                gl.enableVertexAttribArray(overlayProgramAttributes.a_uv);
+                gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
+                gl.vertexAttribPointer(overlayProgramAttributes.a_uv, 2, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(overlayProgramAttributes.a_worldCenter);
+                const bytesPerOverlayCenter = 4 * 3;
+                gl.vertexAttribPointer(overlayProgramAttributes.a_worldCenter, 3, gl.FLOAT, false, bytesPerOverlayCenter, 0);
+                gl.vertexAttribDivisor(overlayProgramAttributes.a_worldCenter, 1);
+
+                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, numLights);
             } else {
                 gl.uniform1i(colorProgramUniforms.u_mode, currentMode);
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
                 gl.clear(gl.COLOR_BUFFER_BIT);
-                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
             }
         } else {
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1568,7 +1705,7 @@ async function main() {
             document.getElementById("spinner").style.display = "";
             start = Date.now() + 2000;
         }
-        const progress = (100 * vertexCount) / (splatData.length / rowLength);
+        const progress = (100 * gaussianCount) / (splatData.length / rowLength);
         if (progress < 100) {
             document.getElementById("progress").style.width = progress + "%";
         } else {
@@ -1617,7 +1754,7 @@ async function main() {
                 } else {
                     worker.postMessage({
                         buffer: splatData.buffer,
-                        vertexCount: Math.floor(splatData.length / rowLength),
+                        gaussianCount: Math.floor(splatData.length / rowLength),
                     });
                 }
             };
@@ -1646,7 +1783,7 @@ async function main() {
     });
 
     let bytesRead = 0;
-    let lastVertexCount = -1;
+    let lastGaussianCount = -1;
     let stopLoading = false;
 
     while (true) {
@@ -1656,18 +1793,18 @@ async function main() {
         splatData.set(value, bytesRead);
         bytesRead += value.length;
 
-        if (vertexCount > lastVertexCount) {
+        if (gaussianCount > lastGaussianCount) {
             worker.postMessage({
                 buffer: splatData.buffer,
-                vertexCount: Math.floor(bytesRead / rowLength),
+                gaussianCount: Math.floor(bytesRead / rowLength),
             });
-            lastVertexCount = vertexCount;
+            lastGaussianCount = gaussianCount;
         }
     }
     if (!stopLoading)
         worker.postMessage({
             buffer: splatData.buffer,
-            vertexCount: Math.floor(bytesRead / rowLength),
+            gaussianCount: Math.floor(bytesRead / rowLength),
         });
 }
 
