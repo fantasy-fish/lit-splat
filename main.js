@@ -158,6 +158,7 @@ let cameras = [
 let camera = cameras[0];
 
 function getProjectionMatrix(fx, fy, width, height) {
+    // Returns a matrix in column-major order.
     const znear = 0.2;
     const zfar = 200;
     return [
@@ -169,6 +170,7 @@ function getProjectionMatrix(fx, fy, width, height) {
 }
 
 function getViewMatrix(camera) {
+    // Returns a matrix in column-major order.
     const R = camera.rotation.flat();
     const t = camera.position;
     const camToWorld = [
@@ -464,6 +466,7 @@ function createWorker(self) {
             depthIndex[starts0[sizeList[i]]++] = i;
 
         console.timeEnd("sort");
+        console.log(`sorted ${vertexCount} vertices`);
 
         lastProj = viewProj;
         self.postMessage({ depthIndex, viewProj, vertexCount }, [
@@ -661,6 +664,7 @@ uniform highp usampler2D u_texture;
 uniform mat4 projection, view;
 uniform vec2 focal;
 uniform vec2 viewport;
+uniform int mode;
 
 in vec2 position;
 in int index;
@@ -680,12 +684,16 @@ void main () {
     }
 
     uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
-    vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
-    mat3 Vrk = mat3(u1.x, u1.y, u2.x, u1.y, u2.y, u3.x, u2.x, u3.x, u3.y);
+    vec2    u1 = unpackHalf2x16(cov.x),
+            u2 = unpackHalf2x16(cov.y),
+            u3 = unpackHalf2x16(cov.z);
+    mat3 Vrk = mat3(u1.x, u1.y, u2.x,
+                    u1.y, u2.y, u3.x,
+                    u2.x, u3.x, u3.y);
 
     mat3 J = mat3(
-        focal.x / cam.z, 0., -(focal.x * cam.x) / (cam.z * cam.z), 
-        0., -focal.y / cam.z, (focal.y * cam.y) / (cam.z * cam.z), 
+        focal.x / cam.z, 0., -(focal.x * cam.x) / (cam.z * cam.z),
+        0., -focal.y / cam.z, (focal.y * cam.y) / (cam.z * cam.z),
         0., 0., 0.
     );
 
@@ -693,7 +701,12 @@ void main () {
     mat3 cov2d = transpose(T) * Vrk * T;
 
     float mid = (cov2d[0][0] + cov2d[1][1]) / 2.0;
-    float radius = length(vec2((cov2d[0][0] - cov2d[1][1]) / 2.0, cov2d[0][1]));
+    float radius = length(
+        vec2(
+            (cov2d[0][0] - cov2d[1][1]) / 2.0,
+            cov2d[0][1]
+        )
+    );
     float lambda1 = mid + radius, lambda2 = mid - radius;
 
     if(lambda2 < 0.0) return;
@@ -701,21 +714,49 @@ void main () {
     vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
     vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
 
-    vColor = clamp(pos2d.z/pos2d.w+1.0, 0.0, 1.0) * vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
+    if (mode == 0) {
+        // Color mode
+        vColor =
+            clamp(pos2d.z/pos2d.w+1.0, 0.0, 1.0) *
+            vec4(
+                (cov.w) & 0xffu,
+                (cov.w >> 8) & 0xffu,
+                (cov.w >> 16) & 0xffu,
+                (cov.w >> 24) & 0xffu
+            ) / 255.0;
+    } else {
+        // Depth mode
+        // TODO(achan): We should compute the depth for each individual fragment based
+        // on its position within the rasterized Gaussian quad, rather than pretend all
+        // fragments of the quad have the depth of the center.
+        //
+        // This seems important for getting the correct world-space point of a fragment
+        // for accurate lighting.
+        float depth = pos2d.w;
+        vColor = vec4(
+            depth,
+            0.,
+            depth,
+            float((cov.w >> 24) & 0xffu) / 255.0
+        );
+    }
     vPosition = position;
 
     vec2 vCenter = vec2(pos2d) / pos2d.w;
     gl_Position = vec4(
-        vCenter 
-        + position.x * majorAxis / viewport 
+        vCenter
+        + position.x * majorAxis / viewport
         + position.y * minorAxis / viewport, 0.0, 1.0);
 
 }
 `.trim();
 
-const fragmentShaderSource = `
+const colorFragmentSource = `
 #version 300 es
 precision highp float;
+precision highp int;
+
+uniform int mode;
 
 in vec4 vColor;
 in vec2 vPosition;
@@ -731,11 +772,80 @@ void main () {
 
 `.trim();
 
+const lightingFragmentSource = `
+#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec2 screenSize;
+uniform int mode;
+uniform sampler2D depthTexture;
+uniform mat4 invProjection, invView;
+uniform vec3 lightPositions[16];
+uniform int numLights;
+
+in vec4 vColor;
+in vec2 vPosition;
+
+out vec4 fragColor;
+
+void main () {
+    float A = -dot(vPosition, vPosition);
+    if (A < -4.0) discard;
+    float B = exp(A) * vColor.a;
+
+    float du = 1.0 / float(textureSize(depthTexture, 0).x);
+    float dv = 1.0 / float(textureSize(depthTexture, 0).y);
+    vec2 uv0 = gl_FragCoord.xy / screenSize;
+    vec2 uv1 = uv0 + vec2(du, 0.);
+    vec2 uv2 = uv0 + vec2(0., dv);
+    // Reconstruct clip-space points.
+    float clip_w0 = texture(depthTexture, uv0).r;
+    float clip_w1 = texture(depthTexture, uv1).r;
+    float clip_w2 = texture(depthTexture, uv2).r;
+    vec2 ndc0 = 2.0 * uv0 - 1.0;
+    vec2 ndc1 = 2.0 * uv1 - 1.0;
+    vec2 ndc2 = 2.0 * uv2 - 1.0;
+
+    float zfar = 200.;
+    float znear = 0.2;
+    float zw = -(zfar + znear)/(znear - zfar);
+    float zb = 2.*zfar*znear/(znear - zfar);
+
+    vec4 clip_p0 = clip_w0 * vec4(ndc0, zw, 1.) + vec4(0., 0., zb, 0.);
+    vec4 clip_p1 = clip_w1 * vec4(ndc1, zw, 1.) + vec4(0., 0., zb, 0.);
+    vec4 clip_p2 = clip_w2 * vec4(ndc2, zw, 1.) + vec4(0., 0., zb, 0.);
+
+    vec4 world_p0 = invView * invProjection * clip_p0;
+    vec4 world_p1 = invView * invProjection * clip_p1;
+    vec4 world_p2 = invView * invProjection * clip_p2;
+
+    vec3 normal = normalize(cross(world_p1.xyz - world_p0.xyz, world_p2.xyz - world_p0.xyz));
+    vec3 diffuse = vColor.rgb;
+    vec3 result = vec3(0.0, 0.0, 0.0);
+    for (int i = 0; i < numLights; i++) {
+        vec3 dirToLight = normalize(lightPositions[i] - world_p0.xyz);
+        float lightIntensity = max(dot(normal, dirToLight), 0.0);
+        result += lightIntensity * diffuse;
+    }
+
+    // fragColor = vec4(0.5*normal + vec3(0.5, 0.5, 0.5), 1.0);
+    fragColor = vec4(B * result, B);
+}
+
+`.trim();
+
 let defaultViewMatrix = [
     0.47, 0.04, 0.88, 0, -0.11, 0.99, 0.02, 0, -0.88, -0.11, 0.47, 0, 0.07,
     0.03, 6.55, 1,
 ];
 let viewMatrix = defaultViewMatrix;
+const MODES = {
+    "COLOR": 0,
+    "DEPTH": 1,
+    "LIGHTING": 2,
+};
+
 async function main() {
     let carousel = true;
     const params = new URLSearchParams(location.search);
@@ -782,6 +892,49 @@ async function main() {
     const gl = canvas.getContext("webgl2", {
         antialias: false,
     });
+    gl.getExtension('EXT_color_buffer_float');
+
+    let LAST_TEX_ID = 0;
+    function createTextureObject(filter) {
+        const texId = LAST_TEX_ID++;
+        gl.activeTexture(gl.TEXTURE0 + texId);
+        let texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return {
+            texture,
+            texId,
+        };
+    }
+    function createFBO(w, h, internalFormat, format, type, filter) {
+        var { texture, texId } = createTextureObject(filter);
+        gl.activeTexture(gl.TEXTURE0 + texId);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            internalFormat,
+            w,
+            h,
+            0,
+            format,
+            type,
+            null,
+        );
+        let fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+        gl.viewport(0, 0, w, h);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        return {
+            texture,
+            fbo,
+            texId,
+        };
+    }
 
     const vertexShader = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(vertexShader, vertexShaderSource);
@@ -789,64 +942,119 @@ async function main() {
     if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS))
         console.error(gl.getShaderInfoLog(vertexShader));
 
-    const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(fragmentShader, fragmentShaderSource);
-    gl.compileShader(fragmentShader);
-    if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS))
-        console.error(gl.getShaderInfoLog(fragmentShader));
+    const colorFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(colorFragmentShader, colorFragmentSource);
+    gl.compileShader(colorFragmentShader);
+    if (!gl.getShaderParameter(colorFragmentShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(colorFragmentShader));
+    }
 
-    const program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-    gl.useProgram(program);
+    const lightingFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(lightingFragmentShader, lightingFragmentSource);
+    gl.compileShader(lightingFragmentShader);
+    if (!gl.getShaderParameter(lightingFragmentShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(lightingFragmentShader));
+    }
 
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
-        console.error(gl.getProgramInfoLog(program));
+    const colorProgram = gl.createProgram();
+    gl.attachShader(colorProgram, vertexShader);
+    gl.attachShader(colorProgram, colorFragmentShader);
+    gl.linkProgram(colorProgram);
+    gl.useProgram(colorProgram);
+    if (!gl.getProgramParameter(colorProgram, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(colorProgram));
+    }
+    const colorProgramUniforms = {
+        u_viewport: gl.getUniformLocation(colorProgram, "viewport"),
+        u_projection: gl.getUniformLocation(colorProgram, "projection"),
+        u_view: gl.getUniformLocation(colorProgram, "view"),
+        u_focal: gl.getUniformLocation(colorProgram, "focal"),
+        u_textureLocation: gl.getUniformLocation(colorProgram, "u_texture"),
+        u_mode: gl.getUniformLocation(colorProgram, "mode"),
+    };
+    const colorProgramAttributes = {
+        a_position: gl.getAttribLocation(colorProgram, "position"),
+        a_index: gl.getAttribLocation(colorProgram, "index"),
+    };
+
+    const lightingProgram = gl.createProgram();
+    gl.attachShader(lightingProgram, vertexShader);
+    gl.attachShader(lightingProgram, lightingFragmentShader);
+    gl.linkProgram(lightingProgram);
+    gl.useProgram(lightingProgram);
+    if (!gl.getProgramParameter(lightingProgram, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(lightingProgram));
+    }
+    const lightingProgramUniforms = {
+        u_viewport: gl.getUniformLocation(lightingProgram, "viewport"),
+        u_projection: gl.getUniformLocation(lightingProgram, "projection"),
+        u_view: gl.getUniformLocation(lightingProgram, "view"),
+        u_focal: gl.getUniformLocation(lightingProgram, "focal"),
+        u_textureLocation: gl.getUniformLocation(lightingProgram, "u_texture"),
+        u_depthTextureLocation: gl.getUniformLocation(lightingProgram, "depthTexture"),
+        u_mode: gl.getUniformLocation(lightingProgram, "mode"),
+        u_screenSize: gl.getUniformLocation(lightingProgram, "screenSize"),
+        u_invProjection: gl.getUniformLocation(lightingProgram, "invProjection"),
+        u_invView: gl.getUniformLocation(lightingProgram, "invView"),
+        u_lightPositions: gl.getUniformLocation(lightingProgram, "lightPositions"),
+        u_numLights: gl.getUniformLocation(lightingProgram, "numLights"),
+    };
+    const lightingProgramAttributes = {
+        a_position: gl.getAttribLocation(lightingProgram, "position"),
+        a_index: gl.getAttribLocation(lightingProgram, "index"),
+    };
 
     gl.disable(gl.DEPTH_TEST); // Disable depth testing
 
     // Enable blending
     gl.enable(gl.BLEND);
-    gl.blendFuncSeparate(
-        gl.ONE_MINUS_DST_ALPHA,
-        gl.ONE,
+    // See eqn. 3 of the 3D gaussian splats paper for alpha blending.
+    // Note in the fragment shader we also pre-multiply the color by the source alpha.
+    gl.blendFunc(
         gl.ONE_MINUS_DST_ALPHA,
         gl.ONE,
     );
     gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
-
-    const u_projection = gl.getUniformLocation(program, "projection");
-    const u_viewport = gl.getUniformLocation(program, "viewport");
-    const u_focal = gl.getUniformLocation(program, "focal");
-    const u_view = gl.getUniformLocation(program, "view");
 
     // positions
     const triangleVertices = new Float32Array([-2, -2, 2, -2, 2, 2, -2, 2]);
     const vertexBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, triangleVertices, gl.STATIC_DRAW);
-    const a_position = gl.getAttribLocation(program, "position");
-    gl.enableVertexAttribArray(a_position);
+
+    gl.enableVertexAttribArray(colorProgramAttributes.a_position);
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.vertexAttribPointer(a_position, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
 
-    var texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.vertexAttribPointer(lightingProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
 
-    var u_textureLocation = gl.getUniformLocation(program, "u_texture");
-    gl.uniform1i(u_textureLocation, 0);
+    var gaussianDataTexture = createTextureObject(gl.NEAREST);
+    gl.bindTexture(gl.TEXTURE_2D, gaussianDataTexture.texture);
+
+    var depthWidth = 640;
+    var depthHeight = 480;
+    let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    gl.uniform1i(lightingProgramUniforms.u_depthTextureLocation, depthFBO.texId);
+
+    var currentMode = MODES.COLOR;
+    var lightPositions = new Float32Array(16 * 3);
+    var numLights = 0;
 
     const indexBuffer = gl.createBuffer();
-    const a_index = gl.getAttribLocation(program, "index");
-    gl.enableVertexAttribArray(a_index);
+
+    gl.enableVertexAttribArray(colorProgramAttributes.a_index);
     gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-    gl.vertexAttribIPointer(a_index, 1, gl.INT, false, 0, 0);
-    gl.vertexAttribDivisor(a_index, 1);
+    gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+    gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
+
+    gl.enableVertexAttribArray(lightingProgramAttributes.a_index);
+    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+    gl.vertexAttribIPointer(lightingProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+    gl.vertexAttribDivisor(lightingProgramAttributes.a_index, 1);
 
     const resize = () => {
-        gl.uniform2fv(u_focal, new Float32Array([camera.fx, camera.fy]));
-
         projectionMatrix = getProjectionMatrix(
             camera.fx,
             camera.fy,
@@ -854,13 +1062,9 @@ async function main() {
             innerHeight,
         );
 
-        gl.uniform2fv(u_viewport, new Float32Array([innerWidth, innerHeight]));
-
         gl.canvas.width = Math.round(innerWidth / downsample);
         gl.canvas.height = Math.round(innerHeight / downsample);
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-
-        gl.uniformMatrix4fv(u_projection, false, projectionMatrix);
     };
 
     window.addEventListener("resize", resize);
@@ -879,21 +1083,8 @@ async function main() {
             link.click();
         } else if (e.data.texdata) {
             const { texdata, texwidth, texheight } = e.data;
-            // console.log(texdata)
-            gl.bindTexture(gl.TEXTURE_2D, texture);
-            gl.texParameteri(
-                gl.TEXTURE_2D,
-                gl.TEXTURE_WRAP_S,
-                gl.CLAMP_TO_EDGE,
-            );
-            gl.texParameteri(
-                gl.TEXTURE_2D,
-                gl.TEXTURE_WRAP_T,
-                gl.CLAMP_TO_EDGE,
-            );
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-
+            gl.activeTexture(gl.TEXTURE0 + gaussianDataTexture.texId);
+            gl.bindTexture(gl.TEXTURE_2D, gaussianDataTexture.texture);
             gl.texImage2D(
                 gl.TEXTURE_2D,
                 0,
@@ -905,8 +1096,6 @@ async function main() {
                 gl.UNSIGNED_INT,
                 texdata,
             );
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, texture);
         } else if (e.data.depthIndex) {
             const { depthIndex, viewProj } = e.data;
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
@@ -916,7 +1105,7 @@ async function main() {
     };
 
     let activeKeys = [];
-	let currentCameraIndex = 0;
+    let currentCameraIndex = 0;
 
     window.addEventListener("keydown", (e) => {
         // if (document.activeElement != document.body) return;
@@ -927,14 +1116,17 @@ async function main() {
             camera = cameras[currentCameraIndex];
             viewMatrix = getViewMatrix(camera);
         }
-		if (['-', '_'].includes(e.key)){
-			currentCameraIndex = (currentCameraIndex + cameras.length - 1) % cameras.length;
-			viewMatrix = getViewMatrix(cameras[currentCameraIndex]);
-		}
-		if (['+', '='].includes(e.key)){
-			currentCameraIndex = (currentCameraIndex + 1) % cameras.length;
-			viewMatrix = getViewMatrix(cameras[currentCameraIndex]);
-		}
+        if (['-', '_'].includes(e.key)){
+            currentCameraIndex = (currentCameraIndex + cameras.length - 1) % cameras.length;
+            viewMatrix = getViewMatrix(cameras[currentCameraIndex]);
+        }
+        if (['+', '='].includes(e.key)){
+            currentCameraIndex = (currentCameraIndex + 1) % cameras.length;
+            viewMatrix = getViewMatrix(cameras[currentCameraIndex]);
+        }
+        if (['m', 'M'].includes(e.key)) {
+            currentMode = (currentMode + 1) % Object.keys(MODES).length;
+        }
         camid.innerText = "cam  " + currentCameraIndex;
         if (e.code == "KeyV") {
             location.hash =
@@ -1330,12 +1522,48 @@ async function main() {
         const currentFps = 1000 / (now - lastFrame) || 0;
         avgFps = avgFps * 0.9 + currentFps * 0.1;
 
+        gl.useProgram(colorProgram);
+        gl.uniform1i(colorProgramUniforms.u_textureLocation, gaussianDataTexture.texId);
+        gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([camera.fx, camera.fy]));
+        gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([innerWidth, innerHeight]));
+        gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, projectionMatrix);
         if (vertexCount > 0) {
             document.getElementById("spinner").style.display = "none";
-            gl.uniformMatrix4fv(u_view, false, actualViewMatrix);
+            gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, actualViewMatrix);
+
+            gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, depthFBO.fbo);
+            gl.viewport(0, 0, depthWidth, depthHeight);
             gl.clear(gl.COLOR_BUFFER_BIT);
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+
+            if (currentMode == MODES.LIGHTING) {
+                gl.useProgram(lightingProgram);
+                gl.uniformMatrix4fv(lightingProgramUniforms.u_view, false, actualViewMatrix);
+                gl.uniform1i(lightingProgramUniforms.u_textureLocation, gaussianDataTexture.texId);
+                gl.uniform2fv(lightingProgramUniforms.u_focal, new Float32Array([camera.fx, camera.fy]));
+                gl.uniform2fv(lightingProgramUniforms.u_viewport, new Float32Array([innerWidth, innerHeight]));
+                gl.uniformMatrix4fv(lightingProgramUniforms.u_projection, false, projectionMatrix);
+                gl.uniform2fv(lightingProgramUniforms.u_screenSize, new Float32Array([gl.canvas.width, gl.canvas.height]));
+                gl.uniform1i(lightingProgramUniforms.u_depthTextureLocation, depthFBO.texId);
+                gl.uniformMatrix4fv(lightingProgramUniforms.u_invProjection, false, invert4(projectionMatrix));
+                gl.uniformMatrix4fv(lightingProgramUniforms.u_invView, false, invert4(actualViewMatrix));
+                gl.uniform3fv(lightingProgramUniforms.u_lightPositions, lightPositions);
+                gl.uniform1i(lightingProgramUniforms.u_numLights, numLights);
+
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+            } else {
+                gl.uniform1i(colorProgramUniforms.u_mode, currentMode);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+            }
         } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
             gl.clear(gl.COLOR_BUFFER_BIT);
             document.getElementById("spinner").style.display = "";
             start = Date.now() + 2000;
@@ -1368,7 +1596,6 @@ async function main() {
                     canvas.width,
                     canvas.height,
                 );
-                gl.uniformMatrix4fv(u_projection, false, projectionMatrix);
 
                 console.log("Loaded Cameras");
             };
