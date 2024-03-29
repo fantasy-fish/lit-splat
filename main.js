@@ -830,11 +830,40 @@ uniform sampler2D depthTexture;
 uniform mat4 invProjection, invView;
 uniform vec3 lightPositions[16];
 uniform int numLights;
+uniform float sigma_range;
+uniform float sigma_domain;
 
 in vec4 vColor;
 in vec2 vPosition;
 
 out vec4 fragColor;
+
+float sampleBilateralFiltered(sampler2D tex, vec2 uv) {
+    vec2 duv = 1.0 / vec2(textureSize(tex, 0));
+    // float sigma_range = 0.001;
+    // float sigma_domain = 100.*duv.x;
+    float sigma_range_sq = sigma_range * sigma_range;
+    float sigma_domain_sq = sigma_domain * sigma_domain;
+    float s0 = texture(tex, uv).r;
+    int kernelSize = 2;
+
+    float result = 0.;
+    float totalWeight = 0.;
+    for (int i = -kernelSize; i <= kernelSize; i++) {
+        for (int j = -kernelSize; j <= kernelSize; j++) {
+            vec2 delta = vec2(i, j) * duv;
+            float uvSqDist = dot(delta, delta);
+            vec2 uvi = uv + delta;
+            float si = texture(tex, uvi).r;
+            float rangeSqDist = (si - s0) * (si - s0);
+            float wi = exp(- uvSqDist / (2. * sigma_domain_sq) - rangeSqDist / (2. * sigma_range_sq));
+            result += si * wi;
+            totalWeight += wi;
+        }
+    }
+    result = result / totalWeight;
+    return result;
+}
 
 void main () {
     float A = -dot(vPosition, vPosition);
@@ -847,9 +876,9 @@ void main () {
     vec2 uv1 = uv0 + vec2(du, 0.);
     vec2 uv2 = uv0 + vec2(0., dv);
     // Reconstruct clip-space points.
-    float clip_w0 = texture(depthTexture, uv0).r;
-    float clip_w1 = texture(depthTexture, uv1).r;
-    float clip_w2 = texture(depthTexture, uv2).r;
+    float clip_w0 = sampleBilateralFiltered(depthTexture, uv0);
+    float clip_w1 = sampleBilateralFiltered(depthTexture, uv1);
+    float clip_w2 = sampleBilateralFiltered(depthTexture, uv2);
     vec2 ndc0 = 2.0 * uv0 - 1.0;
     vec2 ndc1 = 2.0 * uv1 - 1.0;
     vec2 ndc2 = 2.0 * uv2 - 1.0;
@@ -869,11 +898,12 @@ void main () {
 
     vec3 normal = normalize(cross(world_p1.xyz - world_p0.xyz, world_p2.xyz - world_p0.xyz));
     vec3 diffuse = vColor.rgb;
+    float ambient = 0.1;
     vec3 result = vec3(0.0, 0.0, 0.0);
     for (int i = 0; i < numLights; i++) {
         vec3 dirToLight = normalize(lightPositions[i] - world_p0.xyz);
         float lightIntensity = max(dot(normal, dirToLight), 0.0);
-        result += lightIntensity * diffuse;
+        result += (lightIntensity + ambient) * diffuse;
     }
 
     // fragColor = vec4(0.5*normal + vec3(0.5, 0.5, 0.5), 1.0);
@@ -1085,7 +1115,13 @@ async function main() {
         u_invView: gl.getUniformLocation(lightingProgram, "invView"),
         u_lightPositions: gl.getUniformLocation(lightingProgram, "lightPositions"),
         u_numLights: gl.getUniformLocation(lightingProgram, "numLights"),
+        u_sigma_range: gl.getUniformLocation(lightingProgram, "sigma_range"),
+        u_sigma_domain: gl.getUniformLocation(lightingProgram, "sigma_domain"),
     };
+    const sigma_range_step = 0.01;
+    const sigma_domain_step = 1.0 / 640;
+    let sigma_range = 0.1;
+    let sigma_domain = 0.1;
     const lightingProgramAttributes = {
         a_position: gl.getAttribLocation(lightingProgram, "position"),
         a_index: gl.getAttribLocation(lightingProgram, "index"),
@@ -1654,6 +1690,8 @@ async function main() {
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_invView, false, invert4(actualViewMatrix));
                 gl.uniform3fv(lightingProgramUniforms.u_lightPositions, lightPositions);
                 gl.uniform1i(lightingProgramUniforms.u_numLights, numLights);
+                gl.uniform1f(lightingProgramUniforms.u_sigma_range, sigma_range);
+                gl.uniform1f(lightingProgramUniforms.u_sigma_domain, sigma_domain);
 
                 gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
                 gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
