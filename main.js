@@ -218,6 +218,15 @@ function multiply4(a, b) {
     ];
 }
 
+function transform4(T, v) {
+    return [
+        T[0] * v[0] + T[4] * v[1] + T[8] * v[2] + T[12] * v[3],
+        T[1] * v[0] + T[5] * v[1] + T[9] * v[2] + T[13] * v[3],
+        T[2] * v[0] + T[6] * v[1] + T[10] * v[2] + T[14] * v[3],
+        T[3] * v[0] + T[7] * v[1] + T[11] * v[2] + T[15] * v[3],
+    ];
+}
+
 function invert4(a) {
     let b00 = a[0] * a[5] - a[1] * a[4];
     let b01 = a[0] * a[6] - a[2] * a[4];
@@ -1013,8 +1022,10 @@ async function main() {
         };
     }
 
-    var lightPositions = new Float32Array(16 * 3);
-    var numLights = 1;
+    var lightPositions = new Float32Array(16 * 3); // Fixed length for easy upload to GPU
+    var ndcSpaceLightBoundingBoxes = []; // Always has `numLights` elements
+    var numLights = 1; // Max 16
+    var selectedLight = -1;
 
     const indexBuffer = gl.createBuffer();
 
@@ -1320,6 +1331,9 @@ async function main() {
         e.preventDefault();
         startX = e.clientX;
         startY = e.clientY;
+        const ndcX = 2.0 * (e.clientX / innerWidth) - 1.0;
+        const ndcY = 2.0 * (1.0 - e.clientY / innerHeight) - 1.0;
+        selectedLight = getSelectedLight(ndcX, ndcY);
         down = e.ctrlKey || e.metaKey ? 2 : 1;
     });
     canvas.addEventListener("contextmenu", (e) => {
@@ -1330,45 +1344,90 @@ async function main() {
         down = 2;
     });
 
+    function getSelectedLight(ndcX, ndcY) {
+        // TODO break ties with distance from camera
+        for (let i = 0; i < ndcSpaceLightBoundingBoxes.length; i++) {
+            const [minX, maxY, maxX, minY] = ndcSpaceLightBoundingBoxes[i];
+            if (ndcX >= minX && ndcX <= maxX && ndcY >= minY && ndcY <= maxY) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     canvas.addEventListener("mousemove", (e) => {
         e.preventDefault();
-        if (down == 1) {
-            let inv = invert4(viewMatrix);
-            let dx = (5 * (e.clientX - startX)) / innerWidth;
-            let dy = (5 * (e.clientY - startY)) / innerHeight;
-            let d = 4;
+        let useHoverCursor = false;
+        if (down == 0) {
+            const ndcX = 2.0 * (e.clientX / innerWidth) - 1.0;
+            const ndcY = 2.0 * (1.0 - e.clientY / innerHeight) - 1.0;
+            useHoverCursor = getSelectedLight(ndcX, ndcY) >= 0;
+        } else if (down == 1) {
+            if (selectedLight >= 0) {
+                let lightPos = lightPositions.slice(selectedLight * 3, selectedLight * 3 + 3);
+                // Reposition light to the projection of the mouse cursor on the XY-plane at the light's current depth in camera space
+                const viewProj = multiply4(projectionMatrix, viewMatrix);
+                let invViewProj = invert4(viewProj);
+                const lightPosClip = transform4(viewProj, [...lightPos, 1]);
+                const ndcCursor = [2.0 * (e.clientX / innerWidth) - 1.0, 2.0 * (1.0 - e.clientY / innerHeight) - 1.0];
+                const clipCursor = [lightPosClip[3] * ndcCursor[0], lightPosClip[3] * ndcCursor[1], lightPosClip[2], lightPosClip[3]];
+                const worldCursor = transform4(invViewProj, clipCursor);
+                lightPositions.set(worldCursor, selectedLight * 3);
+            } else {
+                let inv = invert4(viewMatrix);
+                // Orbit camera around point `d` units in front
+                let dx = (5 * (e.clientX - startX)) / innerWidth;
+                let dy = (5 * (e.clientY - startY)) / innerHeight;
+                let d = 4;
 
-            inv = translate4(inv, 0, 0, d);
-            inv = rotate4(inv, dx, 0, 1, 0);
-            inv = rotate4(inv, -dy, 1, 0, 0);
-            inv = translate4(inv, 0, 0, -d);
-            // let postAngle = Math.atan2(inv[0], inv[10])
-            // inv = rotate4(inv, postAngle - preAngle, 0, 0, 1)
-            // console.log(postAngle)
-            viewMatrix = invert4(inv);
+                inv = translate4(inv, 0, 0, d);
+                inv = rotate4(inv, dx, 0, 1, 0);
+                inv = rotate4(inv, -dy, 1, 0, 0);
+                inv = translate4(inv, 0, 0, -d);
+                viewMatrix = invert4(inv);
 
-            startX = e.clientX;
-            startY = e.clientY;
+                startX = e.clientX;
+                startY = e.clientY;
+            }
         } else if (down == 2) {
             let inv = invert4(viewMatrix);
-            // inv = rotateY(inv, );
-            // let preY = inv[13];
-            inv = translate4(
-                inv,
-                (-10 * (e.clientX - startX)) / innerWidth,
-                0,
-                (10 * (e.clientY - startY)) / innerHeight,
-            );
-            // inv[13] = preY;
-            viewMatrix = invert4(inv);
-
+            if (selectedLight >= 0) {
+                // Translate light on Z-axis in camera-space
+                let lightPos = lightPositions.slice(selectedLight * 3, selectedLight * 3 + 3);
+                let delta = [
+                    0,
+                    0,
+                    (5 * (e.clientY - startY)) / innerHeight,
+                    1,
+                ];
+                delta = transform4([...inv.slice(0, 12), 0, 0, 0, 1], delta);
+                lightPos[0] += delta[0];
+                lightPos[1] += delta[1];
+                lightPos[2] += delta[2];
+                lightPositions.set(lightPos, selectedLight * 3);
+            } else {
+                // Translate camera on XZ-plane in camera-space
+                inv = translate4(
+                    inv,
+                    (-10 * (e.clientX - startX)) / innerWidth,
+                    0,
+                    (10 * (e.clientY - startY)) / innerHeight,
+                );
+                viewMatrix = invert4(inv);
+            }
             startX = e.clientX;
             startY = e.clientY;
+        }
+        if (useHoverCursor) {
+            document.documentElement.style.cursor = 'grab';
+        } else {
+            document.documentElement.style.cursor = 'default';
         }
     });
     canvas.addEventListener("mouseup", (e) => {
         e.preventDefault();
-        down = false;
+        down = 0;
+        selectedLight = -1;
         startX = 0;
         startY = 0;
     });
@@ -1407,8 +1466,6 @@ async function main() {
 
                 let d = 4;
                 inv = translate4(inv, 0, 0, d);
-                // inv = translate4(inv,  -x, -y, -z);
-                // inv = translate4(inv,  x, y, z);
                 inv = rotate4(inv, dx, 0, 1, 0);
                 inv = rotate4(inv, -dy, 1, 0, 0);
                 inv = translate4(inv, 0, 0, -d);
@@ -1418,7 +1475,6 @@ async function main() {
                 startX = e.touches[0].clientX;
                 startY = e.touches[0].clientY;
             } else if (e.touches.length === 2) {
-                // alert('beep')
                 const dtheta =
                     Math.atan2(startY - altY, startX - altX) -
                     Math.atan2(
@@ -1442,14 +1498,11 @@ async function main() {
                         (startY + altY)) /
                     2;
                 let inv = invert4(viewMatrix);
-                // inv = translate4(inv,  0, 0, d);
                 inv = rotate4(inv, dtheta, 0, 0, 1);
 
                 inv = translate4(inv, -dx / innerWidth, -dy / innerHeight, 0);
 
-                // let preY = inv[13];
                 inv = translate4(inv, 0, 0, 3 * (1 - dscale));
-                // inv[13] = preY;
 
                 viewMatrix = invert4(inv);
 
@@ -1465,7 +1518,8 @@ async function main() {
         "touchend",
         (e) => {
             e.preventDefault();
-            down = false;
+            down = 0;
+            selectedLight = -1;
             startX = 0;
             startY = 0;
         },
@@ -1642,6 +1696,24 @@ async function main() {
         const viewProj = multiply4(projectionMatrix, actualViewMatrix);
         worker.postMessage({ view: viewProj });
 
+        // Hit-test light overlays
+        ndcSpaceLightBoundingBoxes = [];
+        const BBOX_WIDTH = 0.05;
+        const BBOX_HEIGHT = 0.1;
+        for (let i = 0; i < numLights; i++) {
+            const lightPosition = [lightPositions[i * 3], lightPositions[i * 3 + 1], lightPositions[i * 3 + 2], 1.];
+            const clipLightPosition = transform4(viewProj, lightPosition);
+            const ndcLightPositionXY = [
+                clipLightPosition[0] / clipLightPosition[3], clipLightPosition[1] / clipLightPosition[3]
+            ];
+            ndcSpaceLightBoundingBoxes.push([
+                // top-left
+                ndcLightPositionXY[0] - BBOX_WIDTH, ndcLightPositionXY[1] + BBOX_HEIGHT,
+                // bottom-right
+                ndcLightPositionXY[0] + BBOX_WIDTH, ndcLightPositionXY[1] - BBOX_HEIGHT,
+            ]);
+        }
+
         const currentFps = 1000 / (now - lastFrame) || 0;
         avgFps = avgFps * 0.9 + currentFps * 0.1;
 
@@ -1709,9 +1781,6 @@ async function main() {
                 // draw overlays
                 gl.useProgram(overlayProgram);
 
-                gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
-                gl.bufferSubData(gl.ARRAY_BUFFER, 0, lightPositions);
-
                 gl.uniform1i(overlayProgramUniforms.u_texture, lightOverlayTexture.texId);
                 gl.uniformMatrix4fv(overlayProgramUniforms.u_projection, false, projectionMatrix);
                 gl.uniformMatrix4fv(overlayProgramUniforms.u_view, false, actualViewMatrix);
@@ -1726,6 +1795,8 @@ async function main() {
                 gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
                 gl.vertexAttribPointer(overlayProgramAttributes.a_uv, 2, gl.FLOAT, false, 0, 0);
                 gl.enableVertexAttribArray(overlayProgramAttributes.a_worldCenter);
+                gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, lightPositions);
                 const bytesPerOverlayCenter = 4 * 3;
                 gl.vertexAttribPointer(overlayProgramAttributes.a_worldCenter, 3, gl.FLOAT, false, bytesPerOverlayCenter, 0);
                 gl.vertexAttribDivisor(overlayProgramAttributes.a_worldCenter, 1);
