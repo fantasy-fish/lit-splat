@@ -227,6 +227,23 @@ function transform4(T, v) {
     ];
 }
 
+function identity4() {
+    return [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ];
+}
+
+function mat3From4(a) {
+    return [
+        a[0], a[1], a[2],
+        a[4], a[5], a[6],
+        a[8], a[9], a[10],
+    ];
+}
+
 function invert4(a) {
     let b00 = a[0] * a[5] - a[1] * a[4];
     let b01 = a[0] * a[6] - a[2] * a[4];
@@ -948,8 +965,9 @@ void main () {
 
     vec3 normal = normalize(cross(world_p1.xyz - world_p0.xyz, world_p2.xyz - world_p0.xyz));
     vec3 diffuse = vColor.rgb;
-    float ambient = 0.1;
+    float ambient = 0.2;
     vec3 result = vec3(0.0, 0.0, 0.0);
+    float totalIntensity = ambient;
     for (int i = 0; i < numLights; i++) {
         vec3 dirToLight = normalize(lightPositions[i] - world_p0.xyz);
         float lightIntensity = max(dot(normal, dirToLight), 0.0);
@@ -962,11 +980,10 @@ void main () {
                 `case ${i}: shadow = computeShadow(shadowMaps[${i}], lightViewProjMatrices[${i}], world_p0); break;`
             ).join("\n")
         }}
-        result += (lightIntensity * (1. - shadow) + ambient) * diffuse;
+        totalIntensity += lightIntensity * (1. - shadow);
     }
 
-    // fragColor = vec4(0.5*normal + vec3(0.5, 0.5, 0.5), 1.0);
-    fragColor = vec4(B * result, B);
+    fragColor = vec4(B * totalIntensity * diffuse, B);
 }
 
 `.trim();
@@ -1022,6 +1039,7 @@ async function main() {
     const canvas = document.getElementById("canvas");
     const fps = document.getElementById("fps");
     const camid = document.getElementById("camid");
+    const addLightButton = document.getElementById("add-light");
 
     let projectionMatrix;
 
@@ -1092,13 +1110,19 @@ async function main() {
         if (numLights >= MAX_LIGHTS) return;
         const i = numLights++;
         shadowMapFBOs.push(createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR));
+        const angle1 = Math.floor(Math.random() * 4) * Math.PI / 2.;
+        const angle2 = Math.floor(Math.random() * 4) * Math.PI / 2.;
         const camera = {
             position: null,
-            rotation: [
-                [0.876134201218856, 0.06925962026449776, 0.47706599800804744],
-                [-0.04747421839895102, 0.9972110940209488, -0.057586739349882114],
-                [-0.4797239414934443, 0.027805376500959853, 0.8769787916452908],
-            ],
+            rotation: mat3From4(
+                rotate4(
+                    rotate4(
+                        identity4(),
+                        angle1, 0, 1, 0
+                    ),
+                    angle2, 0, 1, 0
+                )
+            ),
             fy: 115,
             fx: 115,
         };
@@ -1112,6 +1136,7 @@ async function main() {
         }
         lights.push(light);
         updateLightPosition(i, [0, 0, 0]);
+        addLightButton.innerHTML = `💡 Add Light (${numLights}/${MAX_LIGHTS})`;
     }
     function updateLightPosition(i, position) {
         const light = lights[i];
@@ -1126,6 +1151,7 @@ async function main() {
         lightPositions[i * 3 + 1] = camera.position[1];
         lightPositions[i * 3 + 2] = camera.position[2];
     }
+    addLightButton.addEventListener("click", addLight);
 
     const lightOverlayTexture = createTextureObject(gl.LINEAR);
     const image = new Image();
