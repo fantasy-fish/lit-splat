@@ -1133,6 +1133,7 @@ async function main() {
             projMatrix: null,
             viewProj: null,
             indexBuffer,
+            needsShadowMapUpdate: false,
         }
         lights.push(light);
         updateLightPosition(i, [0, 0, 0]);
@@ -1145,6 +1146,7 @@ async function main() {
         light.viewMatrix = getViewMatrix(camera);
         light.projMatrix = getProjectionMatrix(camera.fx, camera.fy, shadowMapWidth, shadowMapHeight);
         light.viewProj = multiply4(light.projMatrix, light.viewMatrix);
+        light.needsShadowMapUpdate = true;
         worker.postMessage({ view: light.viewProj, label: `light${i}` });
         // TODO: De-duplicate positions
         lightPositions[i * 3] = camera.position[0];
@@ -1898,17 +1900,21 @@ async function main() {
             if (currentMode == MODES.LIGHTING) {
                 // 2. draw to shadow maps
                 for (let i = 0; i < numLights; i++) {
-                    gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, lights[i].viewMatrix);
-                    gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([lights[i].camera.fx, lights[i].camera.fy]));
+                    const light = lights[i];
+                    if (!light.needsShadowMapUpdate) {
+                        continue;
+                    }
+                    gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, light.viewMatrix);
+                    gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([light.camera.fx, light.camera.fy]));
                     gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapWidth, shadowMapHeight]));
-                    gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, lights[i].projMatrix);
+                    gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, light.projMatrix);
                     gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
 
                     gl.enableVertexAttribArray(colorProgramAttributes.a_position);
                     gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
                     gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
                     gl.enableVertexAttribArray(colorProgramAttributes.a_index);
-                    gl.bindBuffer(gl.ARRAY_BUFFER, lights[i].indexBuffer);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, light.indexBuffer);
                     gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
                     gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
 
@@ -1916,6 +1922,7 @@ async function main() {
                     gl.viewport(0, 0, shadowMapWidth, shadowMapHeight);
                     gl.clear(gl.COLOR_BUFFER_BIT);
                     gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
+                    light.needsShadowMapUpdate = false;
                 }
 
                 // 3. draw scene with lighting
