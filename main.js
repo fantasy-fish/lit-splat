@@ -1310,7 +1310,7 @@ async function main() {
     // Enable blending
     gl.enable(gl.BLEND);
 
-    var currentMode = MODES.COLOR;
+    var currentMode = MODES.LIGHTING;
 
     const resize = () => {
         projectionMatrix = getProjectionMatrix(
@@ -1392,7 +1392,11 @@ async function main() {
             viewMatrix = getViewMatrix(cameras[currentCameraIndex]);
         }
         if (['m', 'M'].includes(e.key)) {
-            currentMode = (currentMode + 1) % Object.keys(MODES).length;
+            if (currentMode == MODES.LIGHTING) {
+                currentMode = MODES.COLOR;
+            } else {
+                currentMode = MODES.LIGHTING;
+            }
         }
         if (['['].includes(e.key)) {
             sigma_range = Math.max(0, sigma_range - sigma_range_step);
