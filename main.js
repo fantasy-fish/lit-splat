@@ -1375,7 +1375,6 @@ async function main() {
                 lightPositions.set(worldCursor, selectedLight * 3);
             } else {
                 let inv = invert4(viewMatrix);
-                // Orbit camera around point `d` units in front
                 let dx = (5 * (e.clientX - startX)) / innerWidth;
                 let dy = (5 * (e.clientY - startY)) / innerHeight;
                 let d = 4;
