@@ -310,7 +310,6 @@ function translate4(a, x, y, z) {
 function createWorker(self) {
     let buffer;
     let gaussianCount = 0;
-    let viewProj;
     // 6*4 + 4 + 4 = 8*4
     // XYZ - Position (Float32)
     // XYZ - Scale (Float32)
@@ -429,7 +428,7 @@ function createWorker(self) {
         self.postMessage({ texdata, texwidth, texheight }, [texdata.buffer]);
     }
 
-    function runSort(viewProj) {
+    function runSort(viewProj, label) {
         if (!buffer) return;
         const f_buffer = new Float32Array(buffer);
         if (lastGaussianCount == gaussianCount) {
@@ -445,7 +444,7 @@ function createWorker(self) {
             lastGaussianCount = gaussianCount;
         }
 
-        console.time("sort");
+        // console.time("sort");
         let maxDepth = -Infinity;
         let minDepth = Infinity;
         let sizeList = new Int32Array(gaussianCount);
@@ -475,11 +474,11 @@ function createWorker(self) {
         for (let i = 0; i < gaussianCount; i++)
             depthIndex[starts0[sizeList[i]]++] = i;
 
-        console.timeEnd("sort");
-        console.log(`sorted ${gaussianCount} gaussians`);
+        // console.timeEnd("sort");
+        // console.log(`sorted ${gaussianCount} gaussians`);
 
         lastProj = viewProj;
-        self.postMessage({ depthIndex, viewProj, gaussianCount }, [
+        self.postMessage({ depthIndex, viewProj, gaussianCount, label }, [
             depthIndex.buffer,
         ]);
     }
@@ -631,36 +630,59 @@ function createWorker(self) {
         return buffer;
     }
 
-    const throttledSort = () => {
-        if (!sortRunning) {
-            sortRunning = true;
-            let lastView = viewProj;
-            runSort(lastView);
-            setTimeout(() => {
-                sortRunning = false;
-                if (lastView !== viewProj) {
-                    throttledSort();
-                }
-            }, 0);
+    const labelsToSorters = {};
+    const getOrCreateThrottledSorter = (label) => {
+        if (!labelsToSorters[label]) {
+            var currViewProj = null;
+            var sortRunning = false;
+            const self = {
+                resortCurrent: () => {
+                    // Call this when something invalidates the current positions or gaussian count,
+                    // e.g. progressively loading another chunk of gaussians
+                    if (currViewProj) {
+                        self.throttledSort(currViewProj);
+                    }
+                },
+                throttledSort: (viewProj) => {
+                    currViewProj = viewProj;
+                    if (!sortRunning) {
+                        sortRunning = true;
+                        let lastView = viewProj;
+                        runSort(lastView, label);
+                        setTimeout(() => {
+                            sortRunning = false;
+                            if (lastView !== currViewProj) {
+                                self.throttledSort(currViewProj);
+                            }
+                        }, 0);
+                    }
+                },
+            };
+            labelsToSorters[label] = self;
         }
+        return labelsToSorters[label];
     };
 
-    let sortRunning;
     self.onmessage = (e) => {
         if (e.data.ply) {
             gaussianCount = 0;
-            runSort(viewProj);
             buffer = processPlyBuffer(e.data.ply);
             gaussianCount = Math.floor(buffer.byteLength / rowLength);
             postMessage({ buffer: buffer });
         } else if (e.data.buffer) {
             buffer = e.data.buffer;
             gaussianCount = e.data.gaussianCount;
+            Object.keys(labelsToSorters).forEach((k) => {
+                labelsToSorters[k].resortCurrent();
+            });
         } else if (e.data.gaussianCount) {
             gaussianCount = e.data.gaussianCount;
         } else if (e.data.view) {
-            viewProj = e.data.view;
-            throttledSort();
+            if (!e.data.label) {
+                console.error("Expected label for sort");
+            } else {
+                getOrCreateThrottledSorter(e.data.label).throttledSort(e.data.view);
+            }
         }
     };
 }
@@ -828,6 +850,7 @@ void main () {
 
 `.trim();
 
+const MAX_LIGHTS = 8;
 const lightingFragmentSource = `
 #version 300 es
 precision highp float;
@@ -837,7 +860,9 @@ uniform vec2 screenSize;
 uniform int mode;
 uniform sampler2D depthTexture;
 uniform mat4 invProjection, invView;
-uniform vec3 lightPositions[16];
+uniform vec3 lightPositions[${MAX_LIGHTS}];
+uniform mat4 lightViewProjMatrices[${MAX_LIGHTS}];
+uniform sampler2D shadowMaps[${MAX_LIGHTS}];
 uniform int numLights;
 uniform float sigma_range;
 uniform float sigma_domain;
@@ -872,6 +897,22 @@ float sampleBilateralFiltered(sampler2D tex, vec2 uv) {
     }
     result = result / totalWeight;
     return result;
+}
+
+float computeShadow(sampler2D shadowMap, mat4 lightViewProjMatrix, vec4 world_p) {
+    vec4 clip_p = lightViewProjMatrix * world_p;
+    vec3 ndc = clip_p.xyz / clip_p.w;
+    vec2 uv = 0.5 * ndc.xy + 0.5;
+    float depth = clip_p.w;
+    float shadow = 1.0;
+    float bias = 0.05;
+    if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+        float shadowDepth = texture(shadowMap, uv).r;
+        if (depth - bias <= shadowDepth) {
+            shadow = 0.0;
+        }
+    }
+    return shadow;
 }
 
 void main () {
@@ -912,7 +953,16 @@ void main () {
     for (int i = 0; i < numLights; i++) {
         vec3 dirToLight = normalize(lightPositions[i] - world_p0.xyz);
         float lightIntensity = max(dot(normal, dirToLight), 0.0);
-        result += (lightIntensity + ambient) * diffuse;
+        float shadow = 0.;
+        switch(i) {
+        ${
+            // Due to GLSL stupidity we can only index into sampler arrays with constants and so need to
+            // codegen this switch statement to allow using the loop counter as array index.
+            new Array(MAX_LIGHTS).fill(0).map((_, i) =>
+                `case ${i}: shadow = computeShadow(shadowMaps[${i}], lightViewProjMatrices[${i}], world_p0); break;`
+            ).join("\n")
+        }}
+        result += (lightIntensity * (1. - shadow) + ambient) * diffuse;
     }
 
     // fragColor = vec4(0.5*normal + vec3(0.5, 0.5, 0.5), 1.0);
@@ -1022,10 +1072,71 @@ async function main() {
         };
     }
 
-    var lightPositions = new Float32Array(16 * 3); // Fixed length for easy upload to GPU
-    var ndcSpaceLightBoundingBoxes = []; // Always has `numLights` elements
-    var numLights = 1; // Max 16
+    var gaussianDataTexture = createTextureObject(gl.NEAREST);
+
+    const depthWidth = 640;
+    const depthHeight = 480;
+    let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+
+    const shadowMapWidth = 100;
+    const shadowMapHeight = 100;
+    let shadowMapFBOs = [];
+    let lights = [];
+    const DUMMY_SHADOW_MAP_FBO = createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+
+    var lightPositions = new Float32Array(MAX_LIGHTS * 3); // Fixed length for easy upload to GPU
+    var ndcSpaceLightBoundingBoxes = []; // At the end of each frame, is guaranteed to have `numLights` elements
+    var numLights = 0;
     var selectedLight = -1;
+    function addLight() {
+        if (numLights >= MAX_LIGHTS) return;
+        const i = numLights++;
+        shadowMapFBOs.push(createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR));
+        const camera = {
+            position: null,
+            rotation: [
+                [0.876134201218856, 0.06925962026449776, 0.47706599800804744],
+                [-0.04747421839895102, 0.9972110940209488, -0.057586739349882114],
+                [-0.4797239414934443, 0.027805376500959853, 0.8769787916452908],
+            ],
+            fy: 115,
+            fx: 115,
+        };
+        const indexBuffer = gl.createBuffer();
+        const light = {
+            camera,
+            viewMatrix: null,
+            projMatrix: null,
+            viewProj: null,
+            indexBuffer,
+        }
+        lights.push(light);
+        updateLightPosition(i, [0, 0, 0]);
+    }
+    function updateLightPosition(i, position) {
+        const light = lights[i];
+        const camera = light.camera;
+        camera.position = position;
+        light.viewMatrix = getViewMatrix(camera);
+        light.projMatrix = getProjectionMatrix(camera.fx, camera.fy, shadowMapWidth, shadowMapHeight);
+        light.viewProj = multiply4(light.projMatrix, light.viewMatrix);
+        worker.postMessage({ view: light.viewProj, label: `light${i}` });
+        // TODO: De-duplicate positions
+        lightPositions[i * 3] = camera.position[0];
+        lightPositions[i * 3 + 1] = camera.position[1];
+        lightPositions[i * 3 + 2] = camera.position[2];
+    }
+
+    const lightOverlayTexture = createTextureObject(gl.LINEAR);
+    const image = new Image();
+    image.src = "./lightbulb.png";
+    image.onload = function() {
+        gl.activeTexture(gl.TEXTURE0 + lightOverlayTexture.texId);
+        gl.bindTexture(gl.TEXTURE_2D, lightOverlayTexture.texture);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    };
 
     const indexBuffer = gl.createBuffer();
 
@@ -1125,6 +1236,8 @@ async function main() {
         u_invProjection: gl.getUniformLocation(lightingProgram, "invProjection"),
         u_invView: gl.getUniformLocation(lightingProgram, "invView"),
         u_lightPositions: gl.getUniformLocation(lightingProgram, "lightPositions"),
+        u_lightViewProjMatrices: gl.getUniformLocation(lightingProgram, "lightViewProjMatrices"),
+        u_shadowMaps: gl.getUniformLocation(lightingProgram, "shadowMaps"),
         u_numLights: gl.getUniformLocation(lightingProgram, "numLights"),
         u_sigma_range: gl.getUniformLocation(lightingProgram, "sigma_range"),
         u_sigma_domain: gl.getUniformLocation(lightingProgram, "sigma_domain"),
@@ -1168,23 +1281,6 @@ async function main() {
 
     // Enable blending
     gl.enable(gl.BLEND);
-
-    var gaussianDataTexture = createTextureObject(gl.NEAREST);
-
-    var depthWidth = 640;
-    var depthHeight = 480;
-    let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
-
-    const lightOverlayTexture = createTextureObject(gl.LINEAR);
-    const image = new Image();
-    image.src = "./lightbulb.png";
-    image.onload = function() {
-        gl.activeTexture(gl.TEXTURE0 + lightOverlayTexture.texId);
-        gl.bindTexture(gl.TEXTURE_2D, lightOverlayTexture.texture);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    };
 
     var currentMode = MODES.COLOR;
 
@@ -1231,9 +1327,18 @@ async function main() {
                 texdata,
             );
         } else if (e.data.depthIndex) {
-            const { depthIndex, viewProj } = e.data;
-            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+            const { depthIndex, label } = e.data;
+            if (!label) {
+                console.error("Expected label for sort result");
+            } else if (label == "main") {
+                gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+            } else if (label.startsWith("light")) {
+                const i = parseInt(label.slice(5));
+                const light = lights[i];
+                gl.bindBuffer(gl.ARRAY_BUFFER, light.indexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+            }
             gaussianCount = e.data.gaussianCount;
         }
     };
@@ -1260,6 +1365,22 @@ async function main() {
         }
         if (['m', 'M'].includes(e.key)) {
             currentMode = (currentMode + 1) % Object.keys(MODES).length;
+        }
+        if (['['].includes(e.key)) {
+            sigma_range = Math.max(0, sigma_range - sigma_range_step);
+            console.log("bilateral filter sigma_range:", sigma_range);
+        }
+        if ([']'].includes(e.key)) {
+            sigma_range += sigma_range_step;
+            console.log("bilateral filter sigma_range:", sigma_range);
+        }
+        if ([';'].includes(e.key)) {
+            sigma_domain = Math.max(0, sigma_domain - sigma_domain_step);
+            console.log("bilateral filter sigma_domain:", sigma_domain);
+        }
+        if (["'"].includes(e.key)) {
+            sigma_domain += sigma_domain_step;
+            console.log("bilateral filter sigma_domain:", sigma_domain);
         }
         camid.innerText = "cam  " + currentCameraIndex;
         if (e.code == "KeyV") {
@@ -1372,7 +1493,7 @@ async function main() {
                 const ndcCursor = [2.0 * (e.clientX / innerWidth) - 1.0, 2.0 * (1.0 - e.clientY / innerHeight) - 1.0];
                 const clipCursor = [lightPosClip[3] * ndcCursor[0], lightPosClip[3] * ndcCursor[1], lightPosClip[2], lightPosClip[3]];
                 const worldCursor = transform4(invViewProj, clipCursor);
-                lightPositions.set(worldCursor, selectedLight * 3);
+                updateLightPosition(selectedLight, worldCursor);
             } else {
                 let inv = invert4(viewMatrix);
                 let dx = (5 * (e.clientX - startX)) / innerWidth;
@@ -1403,7 +1524,7 @@ async function main() {
                 lightPos[0] += delta[0];
                 lightPos[1] += delta[1];
                 lightPos[2] += delta[2];
-                lightPositions.set(lightPos, selectedLight * 3);
+                updateLightPosition(selectedLight, lightPos);
             } else {
                 // Translate camera on XZ-plane in camera-space
                 inv = translate4(
@@ -1693,7 +1814,7 @@ async function main() {
         let actualViewMatrix = invert4(inv2);
 
         const viewProj = multiply4(projectionMatrix, actualViewMatrix);
-        worker.postMessage({ view: viewProj });
+        worker.postMessage({ view: viewProj, label: "main" });
 
         // Hit-test light overlays
         ndcSpaceLightBoundingBoxes = [];
@@ -1731,6 +1852,7 @@ async function main() {
         if (gaussianCount > 0) {
             document.getElementById("spinner").style.display = "none";
 
+            // 1. write to depth framebuffer which will be used for surface normal reconstruction
             gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, actualViewMatrix);
             gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
 
@@ -1748,7 +1870,29 @@ async function main() {
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
 
             if (currentMode == MODES.LIGHTING) {
-                // draw scene with lighting
+                // 2. draw to shadow maps
+                for (let i = 0; i < numLights; i++) {
+                    gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, lights[i].viewMatrix);
+                    gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([lights[i].camera.fx, lights[i].camera.fy]));
+                    gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapWidth, shadowMapHeight]));
+                    gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, lights[i].projMatrix);
+                    gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
+
+                    gl.enableVertexAttribArray(colorProgramAttributes.a_position);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
+                    gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
+                    gl.enableVertexAttribArray(colorProgramAttributes.a_index);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, lights[i].indexBuffer);
+                    gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+                    gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
+
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapFBOs[i].fbo);
+                    gl.viewport(0, 0, shadowMapWidth, shadowMapHeight);
+                    gl.clear(gl.COLOR_BUFFER_BIT);
+                    gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
+                }
+
+                // 3. draw scene with lighting
                 gl.useProgram(lightingProgram);
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_view, false, actualViewMatrix);
                 gl.uniform1i(lightingProgramUniforms.u_textureLocation, gaussianDataTexture.texId);
@@ -1760,6 +1904,15 @@ async function main() {
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_invProjection, false, invert4(projectionMatrix));
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_invView, false, invert4(actualViewMatrix));
                 gl.uniform3fv(lightingProgramUniforms.u_lightPositions, lightPositions);
+                gl.uniformMatrix4fv(lightingProgramUniforms.u_lightViewProjMatrices, false, new Float32Array(lights.map(l => l.viewProj).flat()));
+                gl.uniform1iv(lightingProgramUniforms.u_shadowMaps, new Int32Array(new Array(MAX_LIGHTS).fill(0).map((_, i) => {
+                    if (i < shadowMapFBOs.length) {
+                        return shadowMapFBOs[i].texId;
+                    } else {
+                        // Pad with a dummy sampler unit that won't get used
+                        return DUMMY_SHADOW_MAP_FBO.texId;
+                    }
+                })));
                 gl.uniform1i(lightingProgramUniforms.u_numLights, numLights);
                 gl.uniform1f(lightingProgramUniforms.u_sigma_range, sigma_range);
                 gl.uniform1f(lightingProgramUniforms.u_sigma_domain, sigma_domain);
@@ -1777,7 +1930,7 @@ async function main() {
                 gl.clear(gl.COLOR_BUFFER_BIT);
                 gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
 
-                // draw overlays
+                // 4. draw overlays
                 gl.useProgram(overlayProgram);
 
                 gl.uniform1i(overlayProgramUniforms.u_texture, lightOverlayTexture.texId);
@@ -1802,6 +1955,7 @@ async function main() {
 
                 gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, numLights);
             } else {
+                // 2. If not in lighting mode, just draw scene with color shader (use mode to view depth FBO if specified)
                 gl.uniform1i(colorProgramUniforms.u_mode, currentMode);
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
@@ -1910,6 +2064,7 @@ async function main() {
             lastGaussianCount = gaussianCount;
         }
     }
+    addLight(); // add a light in after everything finishes loading
     if (!stopLoading)
         worker.postMessage({
             buffer: splatData.buffer,
@@ -1920,4 +2075,5 @@ async function main() {
 main().catch((err) => {
     document.getElementById("spinner").style.display = "none";
     document.getElementById("message").innerText = err.toString();
+    throw err;
 });
