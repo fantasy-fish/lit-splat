@@ -918,6 +918,9 @@ float sampleBilateralFiltered(sampler2D tex, vec2 uv) {
 
 float computeShadow(sampler2D shadowMap, mat4 lightViewProjMatrix, vec4 world_p) {
     vec4 clip_p = lightViewProjMatrix * world_p;
+    if (clip_p.z <= 0.0) {
+        return 1.0;
+    }
     vec3 ndc = clip_p.xyz / clip_p.w;
     vec2 uv = 0.5 * ndc.xy + 0.5;
     float depth = clip_p.w;
