@@ -1011,12 +1011,16 @@ async function main() {
         viewMatrix = JSON.parse(decodeURIComponent(location.hash.slice(1)));
         carousel = false;
     } catch (err) {}
+    // const url = new URL(
+    //     // "nike.splat",
+    //     // location.href,
+    //     params.get("url") || "train.splat",
+    //     "https://huggingface.co/cakewalk/splat-data/resolve/main/",
+    // );
     const url = new URL(
-        // "nike.splat",
-        // location.href,
-        params.get("url") || "train.splat",
-        "https://huggingface.co/cakewalk/splat-data/resolve/main/",
-    );
+        "r3dg_lego_phase2.ply",
+        "http://localhost:8000/"
+    )
     const req = await fetch(url, {
         mode: "cors", // no-cors, *cors, same-origin
         credentials: "omit", // include, *same-origin, omit
@@ -1340,14 +1344,18 @@ async function main() {
     worker.onmessage = (e) => {
         if (e.data.buffer) {
             splatData = new Uint8Array(e.data.buffer);
-            const blob = new Blob([splatData.buffer], {
-                type: "application/octet-stream",
+            // const blob = new Blob([splatData.buffer], {
+            //     type: "application/octet-stream",
+            // });
+            // const link = document.createElement("a");
+            // link.download = "model.splat";
+            // link.href = URL.createObjectURL(blob);
+            // document.body.appendChild(link);
+            // link.click();
+            worker.postMessage({
+                buffer: splatData.buffer,
+                gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
             });
-            const link = document.createElement("a");
-            link.download = "model.splat";
-            link.href = URL.createObjectURL(blob);
-            document.body.appendChild(link);
-            link.click();
         } else if (e.data.texdata) {
             const { texdata, texwidth, texheight } = e.data;
             gl.activeTexture(gl.TEXTURE0 + gaussianDataTexture.texId);
@@ -2103,31 +2111,64 @@ async function main() {
         selectFile(e.dataTransfer.files[0]);
     });
 
-    let bytesRead = 0;
-    let lastGaussianCount = -1;
-    let stopLoading = false;
+    // TODO delete the old streaming .splat read code?
+    const useOldSplatStreamingDoesNotWorkWithPLY = false;
+    if (useOldSplatStreamingDoesNotWorkWithPLY) {
+        let bytesRead = 0;
+        let lastGaussianCount = -1;
+        let stopLoading = false;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done || stopLoading) break;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done || stopLoading) break;
 
-        splatData.set(value, bytesRead);
-        bytesRead += value.length;
+            splatData.set(value, bytesRead);
+            bytesRead += value.length;
 
-        if (gaussianCount > lastGaussianCount) {
+            if (gaussianCount > lastGaussianCount) {
+                worker.postMessage({
+                    buffer: splatData.buffer,
+                    gaussianCount: Math.floor(bytesRead / rowLength),
+                });
+                lastGaussianCount = gaussianCount;
+            }
+        }
+        if (!stopLoading) {
             worker.postMessage({
                 buffer: splatData.buffer,
                 gaussianCount: Math.floor(bytesRead / rowLength),
             });
-            lastGaussianCount = gaussianCount;
+        }
+        addLight(); // add a light in after everything finishes loading
+    } else {
+        let bytesRead = 0;
+        let stopLoading = false;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done || stopLoading) break;
+
+            splatData.set(value, bytesRead);
+            bytesRead += value.length;
+        }
+        if (!stopLoading) {
+            if (
+                splatData[0] == 112 &&
+                splatData[1] == 108 &&
+                splatData[2] == 121 &&
+                splatData[3] == 10
+            ) {
+                // ply file magic header means it should be handled differently
+                worker.postMessage({ ply: splatData.buffer });
+            } else {
+                worker.postMessage({
+                    buffer: splatData.buffer,
+                    gaussianCount: Math.floor(splatData.length / rowLength),
+                });
+            }
+            addLight(); // add a light in after everything finishes loading
         }
     }
-    addLight(); // add a light in after everything finishes loading
-    if (!stopLoading)
-        worker.postMessage({
-            buffer: splatData.buffer,
-            gaussianCount: Math.floor(bytesRead / rowLength),
-        });
 }
 
 main().catch((err) => {
