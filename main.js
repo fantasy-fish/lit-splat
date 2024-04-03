@@ -203,7 +203,7 @@ function getProjectionMatrix(fx, fy, width, height) {
 }
 
 function getViewMatrix(camera) {
-    // Returns a matrix in column-major order.
+    // Returns a 4x4 matrix in column-major order.
     const R = camera.rotation.flat();
     const t = camera.position;
     const camToWorld = [
@@ -219,15 +219,38 @@ function getViewMatrix(camera) {
     ].flat();
     return camToWorld;
 }
-// function translate4(a, x, y, z) {
-//     return [
-//         ...a.slice(0, 12),
-//         a[0] * x + a[4] * y + a[8] * z + a[12],
-//         a[1] * x + a[5] * y + a[9] * z + a[13],
-//         a[2] * x + a[6] * y + a[10] * z + a[14],
-//         a[3] * x + a[7] * y + a[11] * z + a[15],
-//     ];
-// }
+function add3(a, b) {
+    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+function sub3(a, b) {
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+function normalize3(v) {
+    const len = Math.max(Math.hypot(v[0], v[1], v[2]), 1e-7);
+    return [v[0] / len, v[1] / len, v[2] / len];
+}
+function cross3(a, b) {
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ];
+}
+function lookAt(eye, center, up) {
+    // Returns a 4x4 matrix in column-major order.
+    const forward = normalize3(sub3(center, eye));
+    const side = normalize3(cross3(forward, up));
+    up = normalize3(cross3(side, forward));
+    return multiply4(
+        [
+            side[0], up[0], -forward[0], 0,
+            side[1], up[1], -forward[1], 0,
+            side[2], up[2], -forward[2], 0,
+            0, 0, 0, 1,
+        ],
+        translate4(identity4(), -eye[0], -eye[1], -eye[2])
+    );
+}
 
 function multiply4(a, b) {
     return [
@@ -817,10 +840,11 @@ in int index;
 
 out vec4 vColor;
 out vec2 vPosition;
+out vec3 vNormal;
 
 void main () {
-    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}, uint(index) >> 10), 0);
-    vec4 cam = view * vec4(uintBitsToFloat(cen.xyz), 1);
+    uvec4 bytes_00_15 = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}, uint(index) >> 10), 0);
+    vec4 cam = view * vec4(uintBitsToFloat(bytes_00_15.xyz), 1);
     vec4 pos2d = projection * cam;
 
     float clip = 1.2 * pos2d.w;
@@ -829,10 +853,10 @@ void main () {
         return;
     }
 
-    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 1u, uint(index) >> 10), 0);
-    vec2    u1 = unpackHalf2x16(cov.x),
-            u2 = unpackHalf2x16(cov.y),
-            u3 = unpackHalf2x16(cov.z);
+    uvec4 bytes_16_31 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 1u, uint(index) >> 10), 0);
+    vec2    u1 = unpackHalf2x16(bytes_16_31.x),
+            u2 = unpackHalf2x16(bytes_16_31.y),
+            u3 = unpackHalf2x16(bytes_16_31.z);
     mat3 Vrk = mat3(u1.x, u1.y, u2.x,
                     u1.y, u2.y, u3.x,
                     u2.x, u3.x, u3.y);
@@ -860,15 +884,19 @@ void main () {
     vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
     vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
 
+    uvec4 bytes_32_47 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 2u, uint(index) >> 10), 0);
+    // TODO handle splat data without normals
+    vNormal = normalize(vec3(uintBitsToFloat(bytes_32_47.xyz)));
+
     if (mode == 0) {
         // Color mode
         vColor =
             clamp(pos2d.z/pos2d.w+1.0, 0.0, 1.0) *
             vec4(
-                (cov.w) & 0xffu,
-                (cov.w >> 8) & 0xffu,
-                (cov.w >> 16) & 0xffu,
-                (cov.w >> 24) & 0xffu
+                (bytes_16_31.w) & 0xffu,
+                (bytes_16_31.w >> 8) & 0xffu,
+                (bytes_16_31.w >> 16) & 0xffu,
+                (bytes_16_31.w >> 24) & 0xffu
             ) / 255.0;
     } else {
         // Depth mode
@@ -882,8 +910,8 @@ void main () {
         vColor = vec4(
             depth,
             0.,
-            depth,
-            float((cov.w >> 24) & 0xffu) / 255.0
+            length(cam.xyz),
+            float((bytes_16_31.w >> 24) & 0xffu) / 255.0
         );
     }
     vPosition = position;
@@ -973,12 +1001,12 @@ precision highp float;
 precision highp int;
 
 uniform vec2 screenSize;
-uniform int mode;
+uniform int usePseudoNormals;
 uniform sampler2D depthTexture;
 uniform mat4 invProjection, invView;
 uniform vec3 lightPositions[${MAX_LIGHTS}];
 uniform mat4 lightViewProjMatrices[${MAX_LIGHTS}];
-uniform sampler2D shadowMaps[${MAX_LIGHTS}];
+uniform samplerCube shadowMaps[${MAX_LIGHTS}];
 uniform int numLights;
 uniform int kernelSize;
 uniform float sigma_range;
@@ -986,6 +1014,7 @@ uniform float sigma_domain;
 
 in vec4 vColor;
 in vec2 vPosition;
+in vec3 vNormal;
 
 out vec4 fragColor;
 
@@ -1015,21 +1044,14 @@ float sampleBilateralFiltered(sampler2D tex, vec2 uv) {
     return result;
 }
 
-float computeShadow(sampler2D shadowMap, mat4 lightViewProjMatrix, vec4 world_p) {
-    vec4 clip_p = lightViewProjMatrix * world_p;
-    if (clip_p.z <= 0.0) {
-        return 1.0;
-    }
-    vec3 ndc = clip_p.xyz / clip_p.w;
-    vec2 uv = 0.5 * ndc.xy + 0.5;
-    float depth = clip_p.w;
+float computeShadow(samplerCube shadowMap, vec3 lightToPoint) {
+    float depth = length(lightToPoint);
+
     float shadow = 1.0;
     float bias = 0.05;
-    if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
-        float shadowDepth = texture(shadowMap, uv).r;
-        if (depth - bias <= shadowDepth) {
-            shadow = 0.0;
-        }
+    float shadowDepth = texture(shadowMap, vec3(lightToPoint.x, -lightToPoint.y, -lightToPoint.z)).b;
+    if (depth - bias <= shadowDepth) {
+        shadow = 0.0;
     }
     return shadow;
 }
@@ -1065,21 +1087,26 @@ void main () {
     vec4 world_p1 = invView * invProjection * clip_p1;
     vec4 world_p2 = invView * invProjection * clip_p2;
 
-    vec3 normal = normalize(cross(world_p1.xyz - world_p0.xyz, world_p2.xyz - world_p0.xyz));
+    vec3 normal = vec3(0., 0., 0.);
+    if (usePseudoNormals == 1) {
+        normal = normalize(cross(world_p1.xyz - world_p0.xyz, world_p2.xyz - world_p0.xyz));
+    } else {
+        normal = vNormal;
+    }
     vec3 diffuse = vColor.rgb;
     float ambient = 0.2;
     vec3 result = vec3(0.0, 0.0, 0.0);
     float totalIntensity = ambient;
     for (int i = 0; i < numLights; i++) {
-        vec3 dirToLight = normalize(lightPositions[i] - world_p0.xyz);
-        float lightIntensity = max(dot(normal, dirToLight), 0.0);
+        vec3 pointToLight = lightPositions[i] - world_p0.xyz;
+        float lightIntensity = max(dot(normal, normalize(pointToLight)), 0.0);
         float shadow = 0.;
         switch(i) {
         ${
             // Due to GLSL stupidity we can only index into sampler arrays with constants and so need to
             // codegen this switch statement to allow using the loop counter as array index.
             new Array(MAX_LIGHTS).fill(0).map((_, i) =>
-                `case ${i}: shadow = computeShadow(shadowMaps[${i}], lightViewProjMatrices[${i}], world_p0); break;`
+                `case ${i}: shadow = computeShadow(shadowMaps[${i}], -pointToLight); break;`
             ).join("\n")
         }}
         totalIntensity += lightIntensity * (1. - shadow);
@@ -1154,58 +1181,81 @@ async function main() {
     gl.getExtension('EXT_color_buffer_float');
 
     let LAST_TEX_ID = 0;
-    function createTextureObject(filter) {
+    function createTextureObject(filter, textureType) {
         const texId = LAST_TEX_ID++;
         gl.activeTexture(gl.TEXTURE0 + texId);
         let texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(textureType, texture);
+        gl.texParameteri(textureType, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(textureType, gl.TEXTURE_MAG_FILTER, filter);
+        gl.texParameteri(textureType, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(textureType, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        if (textureType == gl.TEXTURE_CUBE_MAP) {
+            gl.texParameteri(textureType, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+        }
         return {
             texture,
             texId,
+            textureType,
         };
     }
-    function createFBO(w, h, internalFormat, format, type, filter) {
-        var { texture, texId } = createTextureObject(filter);
-        gl.activeTexture(gl.TEXTURE0 + texId);
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            internalFormat,
-            w,
-            h,
-            0,
-            format,
-            type,
-            null,
-        );
+    function createFBO(w, h, internalFormat, format, type, filter, textureType) {
         let fbo = gl.createFramebuffer();
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-        gl.viewport(0, 0, w, h);
-        gl.clear(gl.COLOR_BUFFER_BIT);
+        var { texture, texId } = createTextureObject(filter, textureType);
+        gl.activeTexture(gl.TEXTURE0 + texId);
+        gl.bindTexture(textureType, texture);
+        if (textureType == gl.TEXTURE_2D) {
+            gl.texImage2D(
+                gl.TEXTURE_2D,
+                0,
+                internalFormat,
+                w,
+                h,
+                0,
+                format,
+                type,
+                null,
+            );
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+            gl.viewport(0, 0, w, h);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+        } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            for (let i = 0; i < 6; i++) {
+                gl.texImage2D(
+                    gl.TEXTURE_CUBE_MAP_POSITIVE_X + i,
+                    0,
+                    internalFormat,
+                    w,
+                    h,
+                    0,
+                    format,
+                    type,
+                    null,
+                )
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_CUBE_MAP_POSITIVE_X + i, texture, 0);
+            }
+        }
         return {
             texture,
+            textureType,
             fbo,
             texId,
         };
     }
 
-    var gaussianDataTexture = createTextureObject(gl.NEAREST);
+    var gaussianDataTexture = createTextureObject(gl.NEAREST, gl.TEXTURE_2D);
 
     const depthWidth = 640;
     const depthHeight = 480;
-    let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_2D);
 
-    const shadowMapWidth = 100;
-    const shadowMapHeight = 100;
+    const shadowMapWidth = 200;
+    const shadowMapHeight = 200;
     let shadowMapFBOs = [];
     let lights = [];
-    const DUMMY_SHADOW_MAP_FBO = createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    const DUMMY_SHADOW_MAP_FBO = createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_CUBE_MAP);
 
     var lightPositions = new Float32Array(MAX_LIGHTS * 3); // Fixed length for easy upload to GPU
     var ndcSpaceLightBoundingBoxes = []; // At the end of each frame, is guaranteed to have `numLights` elements
@@ -1214,31 +1264,19 @@ async function main() {
     function addLight() {
         if (numLights >= MAX_LIGHTS) return;
         const i = numLights++;
-        shadowMapFBOs.push(createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR));
-        const angle1 = Math.floor(Math.random() * 4) * Math.PI / 2.;
-        const angle2 = Math.floor(Math.random() * 4) * Math.PI / 2.;
-        const camera = {
-            position: null,
-            rotation: mat3From4(
-                rotate4(
-                    rotate4(
-                        identity4(),
-                        angle1, 0, 1, 0
-                    ),
-                    angle2, 0, 1, 0
-                )
-            ),
-            fy: 115,
-            fx: 115,
-        };
-        const indexBuffer = gl.createBuffer();
+        shadowMapFBOs.push(createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_CUBE_MAP));
         const light = {
-            camera,
-            viewMatrix: null,
-            projMatrix: null,
-            viewProj: null,
-            indexBuffer,
+            position: null,
+            faces: {},
             needsShadowMapUpdate: false,
+        }
+        for (let i = 0; i < 6; i++) {
+            light.faces[i] = {
+                viewMatrix: null,
+                projMatrix: null,
+                viewProj: null,
+                indexBuffer: gl.createBuffer(),
+            };
         }
         lights.push(light);
         updateLightPosition(i, [0, 0, 0]);
@@ -1246,21 +1284,52 @@ async function main() {
     }
     function updateLightPosition(i, position) {
         const light = lights[i];
-        const camera = light.camera;
-        camera.position = position;
-        light.viewMatrix = getViewMatrix(camera);
-        light.projMatrix = getProjectionMatrix(camera.fx, camera.fy, shadowMapWidth, shadowMapHeight);
-        light.viewProj = multiply4(light.projMatrix, light.viewMatrix);
+        light.position = position;
         light.needsShadowMapUpdate = true;
-        worker.postMessage({ view: light.viewProj, label: `light${i}` });
-        // TODO: De-duplicate positions
-        lightPositions[i * 3] = camera.position[0];
-        lightPositions[i * 3 + 1] = camera.position[1];
-        lightPositions[i * 3 + 2] = camera.position[2];
+        for (let f = 0; f < 6; f++) {
+            switch (f) {
+                case 0: {
+                    // positive x
+                    light.faces[f].viewMatrix = lookAt(position, add3(position, [-1, 0, 0]), [0, -1, 0]);
+                    break;
+                }
+                case 1: {
+                    // negative x
+                    light.faces[f].viewMatrix = lookAt(position, add3(position, [1, 0, 0]), [0, -1, 0]);
+                    break;
+                }
+                case 2: {
+                    // positive y
+                    light.faces[f].viewMatrix = lookAt(position, add3(position, [0, 1, 0]), [0, 0, 1]);
+                    break;
+                }
+                case 3: {
+                    // negative y
+                    light.faces[f].viewMatrix = lookAt(position, add3(position, [0, -1, 0]), [0, 0, -1]);
+                    break;
+                }
+                case 4: {
+                    // positive z
+                    light.faces[f].viewMatrix = lookAt(position, add3(position, [0, 0, 1]), [0, -1, 0]);
+                    break;
+                }
+                case 5: {
+                    // negative z
+                    light.faces[f].viewMatrix = lookAt(position, add3(position, [0, 0, -1]), [0, -1, 0]);
+                    break;
+                }
+            }
+            light.faces[f].projMatrix = getProjectionMatrix(shadowMapWidth / 2, shadowMapHeight / 2, shadowMapWidth, shadowMapHeight);
+            light.faces[f].viewProj = multiply4(light.faces[f].projMatrix, light.faces[f].viewMatrix);
+            worker.postMessage({ view: light.faces[f].viewProj, label: `light-${i}-${f}` });
+        }
+        lightPositions[i * 3] = position[0];
+        lightPositions[i * 3 + 1] = position[1];
+        lightPositions[i * 3 + 2] = position[2];
     }
     addLightButton.addEventListener("click", addLight);
 
-    const lightOverlayTexture = createTextureObject(gl.LINEAR);
+    const lightOverlayTexture = createTextureObject(gl.LINEAR, gl.TEXTURE_2D);
     const image = new Image();
     image.src = "./lightbulb.png";
     image.onload = function() {
@@ -1376,6 +1445,7 @@ async function main() {
         u_sigma_range: gl.getUniformLocation(lightingProgram, "sigma_range"),
         u_sigma_domain: gl.getUniformLocation(lightingProgram, "sigma_domain"),
         u_kernelSize: gl.getUniformLocation(lightingProgram, "kernelSize"),
+        u_usePseudoNormals: gl.getUniformLocation(lightingProgram, "usePseudoNormals"),
     };
     const sigma_range_step = 0.01;
     const sigma_domain_step = 1.0 / 640;
@@ -1383,6 +1453,7 @@ async function main() {
     let sigma_domain = 0.1;
     let alphaThreshold = 0.0;
     let kernelSize = 0;
+    let usePseudoNormals = 0;
     const lightingProgramAttributes = {
         a_position: gl.getAttribLocation(lightingProgram, "position"),
         a_index: gl.getAttribLocation(lightingProgram, "index"),
@@ -1474,10 +1545,12 @@ async function main() {
             } else if (label == "main") {
                 gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
                 gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
-            } else if (label.startsWith("light")) {
-                const i = parseInt(label.slice(5));
+            } else if (label.startsWith("light-")) {
+                // looks like `light-{i}-{face}`
+                const i = parseInt(label.slice(`light-`.length, `light-`.length + 1));
+                const face = parseInt(label.slice(`light-0-`.length, `light-0-`.length + 1));
                 const light = lights[i];
-                gl.bindBuffer(gl.ARRAY_BUFFER, light.indexBuffer);
+                gl.bindBuffer(gl.ARRAY_BUFFER, light.faces[face].indexBuffer);
                 gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
                 light.needsShadowMapUpdate = true;
             }
@@ -1535,6 +1608,10 @@ async function main() {
         if (["'"].includes(e.key)) {
             kernelSize += 1;
             console.log("kernelSize:", kernelSize);
+        }
+        if (["n", "N"].includes(e.key)) {
+            usePseudoNormals = 1 - usePseudoNormals;
+            console.log("usePseudoNormals:", usePseudoNormals);
         }
         camid.innerText = "cam  " + currentCameraIndex;
         if (e.code == "KeyV") {
@@ -2031,24 +2108,28 @@ async function main() {
                     if (!light.needsShadowMapUpdate) {
                         continue;
                     }
-                    gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, light.viewMatrix);
-                    gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([light.camera.fx, light.camera.fy]));
-                    gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapWidth, shadowMapHeight]));
-                    gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, light.projMatrix);
-                    gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
+                    const shadowMapFBO = shadowMapFBOs[i];
+                    for (let f = 0; f < 6; f++) {
+                        gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, light.faces[f].viewMatrix);
+                        gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([shadowMapWidth / 2, shadowMapHeight / 2]));
+                        gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapWidth, shadowMapHeight]));
+                        gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, light.faces[f].projMatrix);
+                        gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
 
-                    gl.enableVertexAttribArray(colorProgramAttributes.a_position);
-                    gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
-                    gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
-                    gl.enableVertexAttribArray(colorProgramAttributes.a_index);
-                    gl.bindBuffer(gl.ARRAY_BUFFER, light.indexBuffer);
-                    gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
-                    gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
+                        gl.enableVertexAttribArray(colorProgramAttributes.a_position);
+                        gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
+                        gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
+                        gl.enableVertexAttribArray(colorProgramAttributes.a_index);
+                        gl.bindBuffer(gl.ARRAY_BUFFER, light.faces[f].indexBuffer);
+                        gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+                        gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
 
-                    gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapFBOs[i].fbo);
-                    gl.viewport(0, 0, shadowMapWidth, shadowMapHeight);
-                    gl.clear(gl.COLOR_BUFFER_BIT);
-                    gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapFBO.fbo);
+                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, shadowMapFBO.texture, 0);
+                        gl.viewport(0, 0, shadowMapWidth, shadowMapHeight);
+                        gl.clear(gl.COLOR_BUFFER_BIT);
+                        gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
+                    }
                     light.needsShadowMapUpdate = false;
                 }
 
@@ -2077,6 +2158,7 @@ async function main() {
                 gl.uniform1f(lightingProgramUniforms.u_sigma_range, sigma_range);
                 gl.uniform1f(lightingProgramUniforms.u_sigma_domain, sigma_domain);
                 gl.uniform1i(lightingProgramUniforms.u_kernelSize, kernelSize);
+                gl.uniform1i(lightingProgramUniforms.u_usePseudoNormals, usePseudoNormals);
 
                 gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
                 gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
