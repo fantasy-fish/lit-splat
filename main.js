@@ -1375,6 +1375,7 @@ async function main() {
                 const light = lights[i];
                 gl.bindBuffer(gl.ARRAY_BUFFER, light.indexBuffer);
                 gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+                light.needsShadowMapUpdate = true;
             }
             gaussianCount = e.data.gaussianCount;
         }
