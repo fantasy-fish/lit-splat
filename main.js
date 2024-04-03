@@ -1,3 +1,35 @@
+function ceilPowerOfTwo(n) {
+    // Returns nearest power of two that is bigger than N
+    return Math.pow(2, Math.ceil(Math.log2(n)));
+}
+
+const PACKED_SPLAT_LENGTH = (
+    3*4 +   // XYZ - Position (Float32)
+    3*4 +   // XYZ - Scale (Float32)
+    4 +     // RGBA - colors (uint8)
+    4 +     // IJKL - quaternion/rot (uint8)
+    3*4 +   // XYZ - Normal (Float32)
+    3 +     // RGB - PBR base colors (uint8)
+    1 +     // ... padding out to 4-byte alignment
+    2*4     // RM - PBR materials (Float32)
+            // ... padding
+);
+const PACKED_RENDERABLE_SPLAT_LENGTH = (
+    3*4 +   // XYZ - Position (Float32)
+    4 +     // ... padding out to BYTES_PER_TEXEL
+    6*2 +   // 6 parameters of covariance matrix (Float16)
+    4 +     // RGBA - colors (uint8)
+    3*4 +   // XYZ - Normal (Float32)
+    3 +     // RGB - PBR base colors (uint8)
+    1 +     // ... padding out to 4-byte alignment
+    2*4     // RM - PBR materials (Float32)
+            // ... padding
+);
+const BYTES_PER_TEXEL = 16; // RGBA32UI = 32 bits per channel * 4 channels = 4*4 bytes
+const TEXELS_PER_PACKED_SPLAT = ceilPowerOfTwo(Math.ceil(PACKED_RENDERABLE_SPLAT_LENGTH / BYTES_PER_TEXEL));
+const PADDED_RENDERABLE_SPLAT_LENGTH = TEXELS_PER_PACKED_SPLAT * BYTES_PER_TEXEL;
+const PADDED_SPLAT_LENGTH = ceilPowerOfTwo(PACKED_SPLAT_LENGTH);
+
 let cameras = [
     {
         id: 0,
@@ -325,14 +357,43 @@ function translate4(a, x, y, z) {
 }
 
 function createWorker(self) {
+    // These constants all need to be redefined because of how the worker is created
+    function ceilPowerOfTwo(n) {
+        // Returns nearest power of two that is bigger than N
+        return Math.pow(2, Math.ceil(Math.log2(n)));
+    }
+    const PACKED_SPLAT_LENGTH = (
+        3*4 +   // XYZ - Position (Float32)
+        3*4 +   // XYZ - Scale (Float32)
+        4 +     // RGBA - colors (uint8)
+        4 +     // IJKL - quaternion/rot (uint8)
+        3*4 +   // XYZ - Normal (Float32)
+        3 +     // RGB - PBR base colors (uint8)
+        1 +     // ... padding out to 4-byte alignment
+        2*4     // RM - PBR materials (Float32)
+                // ... padding
+    );
+    const PACKED_RENDERABLE_SPLAT_LENGTH = (
+        3*4 +   // XYZ - Position (Float32)
+        4 +     // ... padding out to BYTES_PER_TEXEL
+        6*2 +   // 6 parameters of covariance matrix (Float16)
+        4 +     // RGBA - colors (uint8)
+        3*4 +   // XYZ - Normal (Float32)
+        3 +     // RGB - PBR base colors (uint8)
+        1 +     // ... padding out to 4-byte alignment
+        2*4     // RM - PBR materials (Float32)
+                // ... padding
+    );
+    const BYTES_PER_TEXEL = 16; // RGBA32UI = 32 bits per channel * 4 channels = 4*4 bytes
+    const TEXELS_PER_PACKED_SPLAT = ceilPowerOfTwo(Math.ceil(PACKED_RENDERABLE_SPLAT_LENGTH / BYTES_PER_TEXEL));
+    const PADDED_RENDERABLE_SPLAT_LENGTH = TEXELS_PER_PACKED_SPLAT * BYTES_PER_TEXEL;
+    const PADDED_SPLAT_LENGTH = ceilPowerOfTwo(PACKED_SPLAT_LENGTH);
+    const FLOAT32_PER_PADDED_RENDERABLE_SPLAT = PADDED_RENDERABLE_SPLAT_LENGTH / 4;
+    const UINT32_PER_PADDED_RENDERABLE_SPLAT = FLOAT32_PER_PADDED_RENDERABLE_SPLAT;
+    const FLOAT32_PER_PADDED_SPLAT = PADDED_SPLAT_LENGTH / 4;
+
     let buffer;
     let gaussianCount = 0;
-    // 6*4 + 4 + 4 = 8*4
-    // XYZ - Position (Float32)
-    // XYZ - Scale (Float32)
-    // RGBA - colors (uint8)
-    // IJKL - quaternion/rot (uint8)
-    const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
     let lastProj = [];
     let depthIndex = new Uint32Array();
     let lastGaussianCount = 0;
@@ -378,9 +439,9 @@ function createWorker(self) {
         const f_buffer = new Float32Array(buffer);
         const u_buffer = new Uint8Array(buffer);
 
-        var texwidth = 1024 * 2; // Set to your desired width
-        var texheight = Math.ceil((2 * gaussianCount) / texwidth); // Set to your desired height
-        var texdata = new Uint32Array(texwidth * texheight * 4); // 4 components per pixel (RGBA)
+        var texwidth = 1024 * TEXELS_PER_PACKED_SPLAT; // Set to your desired width
+        var texheight = Math.ceil((TEXELS_PER_PACKED_SPLAT * gaussianCount) / texwidth); // Set to your desired height
+        var texdata = new Uint32Array(texwidth * texheight * 4); // 4 Uint32 components per pixel in RGBAUI
         var texdata_c = new Uint8Array(texdata.buffer);
         var texdata_f = new Float32Array(texdata.buffer);
 
@@ -389,28 +450,28 @@ function createWorker(self) {
         // should have been the native format as it'd be very easy to
         // load it into webgl.
         for (let i = 0; i < gaussianCount; i++) {
-            // x, y, z
-            texdata_f[8 * i + 0] = f_buffer[8 * i + 0];
-            texdata_f[8 * i + 1] = f_buffer[8 * i + 1];
-            texdata_f[8 * i + 2] = f_buffer[8 * i + 2];
+            // position x, y, z
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 0] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 0];
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 1] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 1];
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 2] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 2];
 
             // r, g, b, a
-            texdata_c[4 * (8 * i + 7) + 0] = u_buffer[32 * i + 24 + 0];
-            texdata_c[4 * (8 * i + 7) + 1] = u_buffer[32 * i + 24 + 1];
-            texdata_c[4 * (8 * i + 7) + 2] = u_buffer[32 * i + 24 + 2];
-            texdata_c[4 * (8 * i + 7) + 3] = u_buffer[32 * i + 24 + 3];
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 7) + 0] = u_buffer[PADDED_SPLAT_LENGTH * i + 24 + 0];
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 7) + 1] = u_buffer[PADDED_SPLAT_LENGTH * i + 24 + 1];
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 7) + 2] = u_buffer[PADDED_SPLAT_LENGTH * i + 24 + 2];
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 7) + 3] = u_buffer[PADDED_SPLAT_LENGTH * i + 24 + 3];
 
             // quaternions
             let scale = [
-                f_buffer[8 * i + 3 + 0],
-                f_buffer[8 * i + 3 + 1],
-                f_buffer[8 * i + 3 + 2],
+                f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 3 + 0],
+                f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 3 + 1],
+                f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 3 + 2],
             ];
             let rot = [
-                (u_buffer[32 * i + 28 + 0] - 128) / 128,
-                (u_buffer[32 * i + 28 + 1] - 128) / 128,
-                (u_buffer[32 * i + 28 + 2] - 128) / 128,
-                (u_buffer[32 * i + 28 + 3] - 128) / 128,
+                (u_buffer[PADDED_SPLAT_LENGTH * i + 28 + 0] - 128) / 128,
+                (u_buffer[PADDED_SPLAT_LENGTH * i + 28 + 1] - 128) / 128,
+                (u_buffer[PADDED_SPLAT_LENGTH * i + 28 + 2] - 128) / 128,
+                (u_buffer[PADDED_SPLAT_LENGTH * i + 28 + 3] - 128) / 128,
             ];
 
             // Compute the matrix product of S and R (M = S * R)
@@ -437,9 +498,23 @@ function createWorker(self) {
                 M[2] * M[2] + M[5] * M[5] + M[8] * M[8],
             ];
 
-            texdata[8 * i + 4] = packHalf2x16(4 * sigma[0], 4 * sigma[1]);
-            texdata[8 * i + 5] = packHalf2x16(4 * sigma[2], 4 * sigma[3]);
-            texdata[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
+            texdata[UINT32_PER_PADDED_RENDERABLE_SPLAT * i + 4] = packHalf2x16(4 * sigma[0], 4 * sigma[1]);
+            texdata[UINT32_PER_PADDED_RENDERABLE_SPLAT * i + 5] = packHalf2x16(4 * sigma[2], 4 * sigma[3]);
+            texdata[UINT32_PER_PADDED_RENDERABLE_SPLAT * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
+
+            // normal x, y, z
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 0] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 0];
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 1] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 1];
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 2] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 2];
+
+            // PBR base colors r, g, b
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 11) + 0] = u_buffer[PADDED_SPLAT_LENGTH * i + 4*11 + 0];
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 11) + 1] = u_buffer[PADDED_SPLAT_LENGTH * i + 4*11 + 1];
+            texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 11) + 2] = u_buffer[PADDED_SPLAT_LENGTH * i + 4*11 + 2];
+
+            // PBR roughness, metallic
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 12 + 0] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 12 + 0];
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 12 + 1] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 12 + 1];
         }
 
         self.postMessage({ texdata, texwidth, texheight }, [texdata.buffer]);
@@ -467,9 +542,9 @@ function createWorker(self) {
         let sizeList = new Int32Array(gaussianCount);
         for (let i = 0; i < gaussianCount; i++) {
             let depth =
-                ((viewProj[2] * f_buffer[8 * i + 0] +
-                    viewProj[6] * f_buffer[8 * i + 1] +
-                    viewProj[10] * f_buffer[8 * i + 2]) *
+                ((viewProj[2] * f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 0] +
+                    viewProj[6] * f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 1] +
+                    viewProj[10] * f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 2]) *
                     4096) |
                 0;
             sizeList[i] = depth;
@@ -532,7 +607,6 @@ function createWorker(self) {
             offsets[name] = row_offset;
             row_offset += parseInt(arrayType.replace(/[^\d]/g, "")) / 8;
         }
-        console.log("Bytes per row", row_offset, types, offsets);
 
         let dataView = new DataView(
             inputBuffer,
@@ -571,29 +645,38 @@ function createWorker(self) {
         sizeIndex.sort((b, a) => sizeList[a] - sizeList[b]);
         console.timeEnd("sort");
 
-        // 6*4 + 4 + 4 = 8*4
-        // XYZ - Position (Float32)
-        // XYZ - Scale (Float32)
-        // RGBA - colors (uint8)
-        // IJKL - quaternion/rot (uint8)
-        const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
-        const buffer = new ArrayBuffer(rowLength * gaussianCount);
+        const buffer = new ArrayBuffer(PADDED_SPLAT_LENGTH * gaussianCount);
 
         console.time("build buffer");
         for (let j = 0; j < gaussianCount; j++) {
             row = sizeIndex[j];
 
-            const position = new Float32Array(buffer, j * rowLength, 3);
-            const scales = new Float32Array(buffer, j * rowLength + 4 * 3, 3);
+            const position = new Float32Array(buffer, j * PADDED_SPLAT_LENGTH, 3);
+            const scales = new Float32Array(buffer, j * PADDED_SPLAT_LENGTH + 4 * 3, 3);
             const rgba = new Uint8ClampedArray(
                 buffer,
-                j * rowLength + 4 * 3 + 4 * 3,
+                j*PADDED_SPLAT_LENGTH + 3*4 + 3*4,
                 4,
             );
             const rot = new Uint8ClampedArray(
                 buffer,
-                j * rowLength + 4 * 3 + 4 * 3 + 4,
+                j*PADDED_SPLAT_LENGTH + 3*4 + 3*4 + 4,
                 4,
+            );
+            const normal = new Float32Array(
+                buffer,
+                j*PADDED_SPLAT_LENGTH + 3*4 + 3*4 + 4 + 4,
+                3,
+            );
+            const pbrRGB = new Uint8ClampedArray(
+                buffer,
+                j*PADDED_SPLAT_LENGTH + 3*4 + 3*4 + 4 + 4 + 3*4,
+                3,
+            );
+            const pbrRM = new Float32Array(
+                buffer,
+                j*PADDED_SPLAT_LENGTH + 3*4 + 3*4 + 4 + 4 + 3*4 + 3 + 1,
+                2,
             );
 
             if (types["scale_0"]) {
@@ -642,6 +725,20 @@ function createWorker(self) {
             } else {
                 rgba[3] = 255;
             }
+            if (types["nx"] && types["ny"] && types["nz"]) {
+                normal[0] = attrs.nx;
+                normal[1] = attrs.ny;
+                normal[2] = attrs.nz;
+            }
+            if (types["base_color_0"] && types["base_color_1"] && types["base_color_2"]) {
+                pbrRGB[0] = attrs.base_color_0 * 255;
+                pbrRGB[1] = attrs.base_color_1 * 255;
+                pbrRGB[2] = attrs.base_color_2 * 255;
+            }
+            if (types["roughness"] && types["metallic"]) {
+                pbrRM[0] = attrs.roughness;
+                pbrRM[1] = attrs.metallic;
+            }
         }
         console.timeEnd("build buffer");
         return buffer;
@@ -684,7 +781,7 @@ function createWorker(self) {
         if (e.data.ply) {
             gaussianCount = 0;
             buffer = processPlyBuffer(e.data.ply);
-            gaussianCount = Math.floor(buffer.byteLength / rowLength);
+            gaussianCount = Math.floor(buffer.byteLength / PADDED_SPLAT_LENGTH);
             postMessage({ buffer: buffer });
         } else if (e.data.buffer) {
             buffer = e.data.buffer;
@@ -722,7 +819,7 @@ out vec4 vColor;
 out vec2 vPosition;
 
 void main () {
-    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
+    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}, uint(index) >> 10), 0);
     vec4 cam = view * vec4(uintBitsToFloat(cen.xyz), 1);
     vec4 pos2d = projection * cam;
 
@@ -732,7 +829,7 @@ void main () {
         return;
     }
 
-    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 1u, uint(index) >> 10), 0);
     vec2    u1 = unpackHalf2x16(cov.x),
             u2 = unpackHalf2x16(cov.y),
             u3 = unpackHalf2x16(cov.z);
@@ -1029,13 +1126,12 @@ async function main() {
     if (req.status != 200)
         throw new Error(req.status + " Unable to load " + req.url);
 
-    const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
     const reader = req.body.getReader();
     let splatData = new Uint8Array(req.headers.get("content-length"));
 
     const downsample =
-        splatData.length / rowLength > 500000 ? 1 : 1 / devicePixelRatio;
-    console.log(splatData.length / rowLength, downsample);
+        splatData.length / PADDED_SPLAT_LENGTH > 500000 ? 1 : 1 / devicePixelRatio;
+    console.log(splatData.length / PADDED_SPLAT_LENGTH, downsample);
 
     const worker = new Worker(
         URL.createObjectURL(
@@ -2034,7 +2130,7 @@ async function main() {
             document.getElementById("spinner").style.display = "";
             start = Date.now() + 2000;
         }
-        const progress = (100 * gaussianCount) / (splatData.length / rowLength);
+        const progress = (100 * gaussianCount) / (splatData.length / PADDED_SPLAT_LENGTH);
         if (progress < 100) {
             document.getElementById("progress").style.width = progress + "%";
         } else {
@@ -2070,7 +2166,7 @@ async function main() {
             stopLoading = true;
             fr.onload = () => {
                 splatData = new Uint8Array(fr.result);
-                console.log("Loaded", Math.floor(splatData.length / rowLength));
+                console.log("Loaded", Math.floor(splatData.length / PADDED_SPLAT_LENGTH));
 
                 if (
                     splatData[0] == 112 &&
@@ -2083,7 +2179,7 @@ async function main() {
                 } else {
                     worker.postMessage({
                         buffer: splatData.buffer,
-                        gaussianCount: Math.floor(splatData.length / rowLength),
+                        gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
                     });
                 }
             };
@@ -2128,7 +2224,7 @@ async function main() {
             if (gaussianCount > lastGaussianCount) {
                 worker.postMessage({
                     buffer: splatData.buffer,
-                    gaussianCount: Math.floor(bytesRead / rowLength),
+                    gaussianCount: Math.floor(bytesRead / PADDED_SPLAT_LENGTH),
                 });
                 lastGaussianCount = gaussianCount;
             }
@@ -2136,7 +2232,7 @@ async function main() {
         if (!stopLoading) {
             worker.postMessage({
                 buffer: splatData.buffer,
-                gaussianCount: Math.floor(bytesRead / rowLength),
+                gaussianCount: Math.floor(bytesRead / PADDED_SPLAT_LENGTH),
             });
         }
         addLight(); // add a light in after everything finishes loading
@@ -2163,7 +2259,7 @@ async function main() {
             } else {
                 worker.postMessage({
                     buffer: splatData.buffer,
-                    gaussianCount: Math.floor(splatData.length / rowLength),
+                    gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
                 });
             }
             addLight(); // add a light in after everything finishes loading
