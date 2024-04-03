@@ -852,6 +852,7 @@ precision highp float;
 precision highp int;
 
 uniform int mode;
+uniform float alphaThreshold;
 
 in vec4 vColor;
 in vec2 vPosition;
@@ -859,6 +860,7 @@ in vec2 vPosition;
 out vec4 fragColor;
 
 void main () {
+    if (vColor.a < alphaThreshold) discard;
     float A = -dot(vPosition, vPosition);
     if (A < -4.0) discard;
     float B = exp(A) * vColor.a;
@@ -881,6 +883,7 @@ uniform vec3 lightPositions[${MAX_LIGHTS}];
 uniform mat4 lightViewProjMatrices[${MAX_LIGHTS}];
 uniform sampler2D shadowMaps[${MAX_LIGHTS}];
 uniform int numLights;
+uniform int kernelSize;
 uniform float sigma_range;
 uniform float sigma_domain;
 
@@ -896,7 +899,6 @@ float sampleBilateralFiltered(sampler2D tex, vec2 uv) {
     float sigma_range_sq = sigma_range * sigma_range;
     float sigma_domain_sq = sigma_domain * sigma_domain;
     float s0 = texture(tex, uv).r;
-    int kernelSize = 2;
 
     float result = 0.;
     float totalWeight = 0.;
@@ -1241,6 +1243,7 @@ async function main() {
         u_focal: gl.getUniformLocation(colorProgram, "focal"),
         u_textureLocation: gl.getUniformLocation(colorProgram, "u_texture"),
         u_mode: gl.getUniformLocation(colorProgram, "mode"),
+        u_alphaThreshold: gl.getUniformLocation(colorProgram, "alphaThreshold"),
     };
     const colorProgramAttributes = {
         a_position: gl.getAttribLocation(colorProgram, "position"),
@@ -1272,11 +1275,14 @@ async function main() {
         u_numLights: gl.getUniformLocation(lightingProgram, "numLights"),
         u_sigma_range: gl.getUniformLocation(lightingProgram, "sigma_range"),
         u_sigma_domain: gl.getUniformLocation(lightingProgram, "sigma_domain"),
+        u_kernelSize: gl.getUniformLocation(lightingProgram, "kernelSize"),
     };
     const sigma_range_step = 0.01;
     const sigma_domain_step = 1.0 / 640;
     let sigma_range = 0.1;
     let sigma_domain = 0.1;
+    let alphaThreshold = 0.0;
+    let kernelSize = 0;
     const lightingProgramAttributes = {
         a_position: gl.getAttribLocation(lightingProgram, "position"),
         a_index: gl.getAttribLocation(lightingProgram, "index"),
@@ -1409,13 +1415,21 @@ async function main() {
             sigma_range += sigma_range_step;
             console.log("bilateral filter sigma_range:", sigma_range);
         }
+        if ([',','<'].includes(e.key)) {
+            alphaThreshold = Math.max(0, alphaThreshold - 0.01);
+            console.log("alphaThreshold:", alphaThreshold);
+        }
+        if (['.','>'].includes(e.key)) {
+            alphaThreshold = Math.min(1, alphaThreshold + 0.01);
+            console.log("alphaThreshold:", alphaThreshold);
+        }
         if ([';'].includes(e.key)) {
-            sigma_domain = Math.max(0, sigma_domain - sigma_domain_step);
-            console.log("bilateral filter sigma_domain:", sigma_domain);
+            kernelSize = Math.max(0, kernelSize - 1);
+            console.log("kernelSize:", kernelSize);
         }
         if (["'"].includes(e.key)) {
-            sigma_domain += sigma_domain_step;
-            console.log("bilateral filter sigma_domain:", sigma_domain);
+            kernelSize += 1;
+            console.log("kernelSize:", kernelSize);
         }
         camid.innerText = "cam  " + currentCameraIndex;
         if (e.code == "KeyV") {
@@ -1890,6 +1904,7 @@ async function main() {
             // 1. write to depth framebuffer which will be used for surface normal reconstruction
             gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, actualViewMatrix);
             gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
+            gl.uniform1f(colorProgramUniforms.u_alphaThreshold, alphaThreshold);
 
             gl.enableVertexAttribArray(colorProgramAttributes.a_position);
             gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
@@ -1956,6 +1971,7 @@ async function main() {
                 gl.uniform1i(lightingProgramUniforms.u_numLights, numLights);
                 gl.uniform1f(lightingProgramUniforms.u_sigma_range, sigma_range);
                 gl.uniform1f(lightingProgramUniforms.u_sigma_domain, sigma_domain);
+                gl.uniform1i(lightingProgramUniforms.u_kernelSize, kernelSize);
 
                 gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
                 gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
@@ -1997,6 +2013,7 @@ async function main() {
             } else {
                 // 2. If not in lighting mode, just draw scene with color shader (use mode to view depth FBO if specified)
                 gl.uniform1i(colorProgramUniforms.u_mode, currentMode);
+                gl.uniform1f(colorProgramUniforms.u_alphaThreshold, alphaThreshold);
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
                 gl.clear(gl.COLOR_BUFFER_BIT);
