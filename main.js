@@ -1203,16 +1203,10 @@ async function main() {
         viewMatrix = JSON.parse(decodeURIComponent(location.hash.slice(1)));
         carousel = false;
     } catch (err) {}
-    // const url = new URL(
-    //     // "nike.splat",
-    //     // location.href,
-    //     params.get("url") || "train.splat",
-    //     "https://huggingface.co/cakewalk/splat-data/resolve/main/",
-    // );
     const url = new URL(
-        "r3dg_lego_phase2.ply",
-        "http://localhost:8000/"
-    )
+        params.get("url") || "r3dg_lego_phase2.ply",
+        "https://huggingface.co/datasets/andrewkchan/lit-splat-data/resolve/main/"
+    );
     const req = await fetch(url, {
         mode: "cors", // no-cors, *cors, same-origin
         credentials: "omit", // include, *same-origin, omit
