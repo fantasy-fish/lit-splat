@@ -1081,9 +1081,6 @@ uniform vec3 lightPositions[${MAX_LIGHTS}];
 uniform mat4 lightViewProjMatrices[${MAX_LIGHTS}];
 uniform samplerCube shadowMaps[${MAX_LIGHTS}];
 uniform int numLights;
-uniform int kernelSize;
-uniform float sigma_range;
-uniform float sigma_domain;
 
 in vec4 vColor;
 in vec2 vPosition;
@@ -1093,32 +1090,6 @@ in float vMetallic;
 in float vRoughness;
 
 out vec4 fragColor;
-
-float sampleBilateralFiltered(sampler2D tex, vec2 uv) {
-    vec2 duv = 1.0 / vec2(textureSize(tex, 0));
-    // float sigma_range = 0.001;
-    // float sigma_domain = 100.*duv.x;
-    float sigma_range_sq = sigma_range * sigma_range;
-    float sigma_domain_sq = sigma_domain * sigma_domain;
-    float s0 = texture(tex, uv).r;
-
-    float result = 0.;
-    float totalWeight = 0.;
-    for (int i = -kernelSize; i <= kernelSize; i++) {
-        for (int j = -kernelSize; j <= kernelSize; j++) {
-            vec2 delta = vec2(i, j) * duv;
-            float uvSqDist = dot(delta, delta);
-            vec2 uvi = uv + delta;
-            float si = texture(tex, uvi).r;
-            float rangeSqDist = (si - s0) * (si - s0);
-            float wi = exp(- uvSqDist / (2. * sigma_domain_sq) - rangeSqDist / (2. * sigma_range_sq));
-            result += si * wi;
-            totalWeight += wi;
-        }
-    }
-    result = result / totalWeight;
-    return result;
-}
 
 float computeShadow(samplerCube shadowMap, vec3 lightToPoint) {
     float depth = length(lightToPoint);
@@ -1167,9 +1138,9 @@ void main () {
     vec2 uv1 = uv0 + vec2(du, 0.);
     vec2 uv2 = uv0 + vec2(0., dv);
     // Reconstruct clip-space points.
-    float clip_w0 = sampleBilateralFiltered(depthTexture, uv0);
-    float clip_w1 = sampleBilateralFiltered(depthTexture, uv1);
-    float clip_w2 = sampleBilateralFiltered(depthTexture, uv2);
+    float clip_w0 = texture(depthTexture, uv0).r;
+    float clip_w1 = texture(depthTexture, uv1).r;
+    float clip_w2 = texture(depthTexture, uv2).r;
     vec2 ndc0 = 2.0 * uv0 - 1.0;
     vec2 ndc1 = 2.0 * uv1 - 1.0;
     vec2 ndc2 = 2.0 * uv2 - 1.0;
@@ -1237,6 +1208,63 @@ void main () {
     }
 
     fragColor = vec4(B * result, B);
+}
+
+`.trim();
+
+const filterVertexSource = `
+#version 300 es
+precision highp float;
+
+in vec2 uv;
+
+out vec2 vUv;
+
+void main () {
+    vUv = uv;
+    gl_Position = vec4(2.*uv.x - 1., 2.*uv.y - 1., 0., 1.);
+}
+`.trim();
+
+const filterFragmentSource = `
+#version 300 es
+precision highp float;
+
+uniform sampler2D tex;
+uniform int kernelSize;
+uniform float sigma_range;
+uniform float sigma_domain;
+
+in vec2 vUv;
+
+out vec4 fragColor;
+
+vec4 sampleBilateralFiltered(sampler2D tex, vec2 uv) {
+    vec2 duv = 1.0 / vec2(textureSize(tex, 0));
+    float sigma_range_sq = sigma_range * sigma_range;
+    float sigma_domain_sq = sigma_domain * sigma_domain;
+    vec4 s0 = texture(tex, uv);
+
+    vec4 result = vec4(0.);
+    vec4 totalWeight = vec4(0.);
+    for (int i = -kernelSize; i <= kernelSize; i++) {
+        for (int j = -kernelSize; j <= kernelSize; j++) {
+            vec2 delta = vec2(i, j) * duv;
+            float uvSqDist = dot(delta, delta);
+            vec2 uvi = uv + delta;
+            vec4 si = texture(tex, uvi);
+            vec4 rangeSqDist = (si - s0) * (si - s0);
+            vec4 wi = exp(- vec4(uvSqDist / (2. * sigma_domain_sq)) - rangeSqDist / (2. * sigma_range_sq));
+            result += si * wi;
+            totalWeight += wi;
+        }
+    }
+    result = result / totalWeight;
+    return result;
+}
+
+void main () {
+    fragColor = sampleBilateralFiltered(tex, vUv);
 }
 
 `.trim();
@@ -1368,6 +1396,7 @@ async function main() {
     const depthWidth = 640;
     const depthHeight = 480;
     let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_2D);
+    let filteredDepthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_2D);
 
     const shadowMapSize = 400;
     let shadowMapFBOs = [];
@@ -1469,15 +1498,15 @@ async function main() {
     gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, GAUSSIAN_QUAD_VERTICES, gl.STATIC_DRAW);
 
-    const OVERLAY_QUAD_UVS = new Float32Array([
+    const QUAD_UVS = new Float32Array([
         0, 1,
         1, 1,
         1, 0,
         0, 0
     ]);
-    const overlayQuadUVBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, OVERLAY_QUAD_UVS, gl.STATIC_DRAW);
+    const quadUVBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadUVBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, QUAD_UVS, gl.STATIC_DRAW);
 
     const gaussianVertexShader = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(gaussianVertexShader, gaussianVertexSource);
@@ -1512,6 +1541,20 @@ async function main() {
     gl.compileShader(overlayFragmentShader);
     if (!gl.getShaderParameter(overlayFragmentShader, gl.COMPILE_STATUS)) {
         console.error(gl.getShaderInfoLog(overlayFragmentShader));
+    }
+
+    const filterVertexShader = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(filterVertexShader, filterVertexSource);
+    gl.compileShader(filterVertexShader);
+    if (!gl.getShaderParameter(filterVertexShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(filterVertexShader));
+    }
+
+    const filterFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(filterFragmentShader, filterFragmentSource);
+    gl.compileShader(filterFragmentShader);
+    if (!gl.getShaderParameter(filterFragmentShader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(filterFragmentShader));
     }
 
     const colorProgram = gl.createProgram();
@@ -1565,17 +1608,35 @@ async function main() {
         u_usePseudoNormals: gl.getUniformLocation(lightingProgram, "usePseudoNormals"),
         u_usePBR: gl.getUniformLocation(lightingProgram, "usePBR"),
     };
-    const sigma_range_step = 0.01;
-    const sigma_domain_step = 1.0 / 640;
-    let sigma_range = 0.1;
-    let sigma_domain = 0.1;
     let alphaThreshold = 0.0;
-    let kernelSize = 0;
     let usePseudoNormals = 0;
     let usePBR = 0;
     const lightingProgramAttributes = {
         a_position: gl.getAttribLocation(lightingProgram, "position"),
         a_index: gl.getAttribLocation(lightingProgram, "index"),
+    };
+
+    const filterProgram = gl.createProgram();
+    gl.attachShader(filterProgram, filterVertexShader);
+    gl.attachShader(filterProgram, filterFragmentShader);
+    gl.linkProgram(filterProgram);
+    gl.useProgram(filterProgram);
+    if (!gl.getProgramParameter(filterProgram, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(filterProgram));
+    }
+    const filterProgramUniforms = {
+        u_tex: gl.getUniformLocation(filterProgram, "tex"),
+        u_sigma_range: gl.getUniformLocation(filterProgram, "sigma_range"),
+        u_sigma_domain: gl.getUniformLocation(filterProgram, "sigma_domain"),
+        u_kernelSize: gl.getUniformLocation(filterProgram, "kernelSize"),
+    };
+    const sigma_range_step = 0.01;
+    const sigma_domain_step = 1.0 / 640;
+    let sigma_range = 0.1;
+    let sigma_domain = 0.1;
+    let kernelSize = 1;
+    const filterProgramAttributes = {
+        a_uv: gl.getAttribLocation(filterProgram, "uv"),
     };
 
     const overlayProgram = gl.createProgram();
@@ -2224,6 +2285,23 @@ async function main() {
             gl.clear(gl.COLOR_BUFFER_BIT);
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
 
+            // Filter depth bilaterally
+            gl.useProgram(filterProgram);
+
+            gl.uniform1i(filterProgramUniforms.u_tex, depthFBO.texId);
+            gl.uniform1i(filterProgramUniforms.u_kernelSize, kernelSize);
+            gl.uniform1f(filterProgramUniforms.u_sigma_domain, sigma_domain);
+            gl.uniform1f(filterProgramUniforms.u_sigma_range, sigma_range);
+
+            gl.enableVertexAttribArray(filterProgramAttributes.a_uv);
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadUVBuffer);
+            gl.vertexAttribPointer(filterProgramAttributes.a_uv, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, filteredDepthFBO.fbo);
+            gl.viewport(0, 0, depthWidth, depthHeight);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
             if (currentMode == MODES.LIGHTING) {
                 // 2. draw to shadow maps
                 for (let i = 0; i < numLights; i++) {
@@ -2233,6 +2311,8 @@ async function main() {
                     }
                     const shadowMapFBO = shadowMapFBOs[i];
                     for (let f = 0; f < 6; f++) {
+                        gl.useProgram(colorProgram);
+
                         gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, light.faces[f].viewMatrix);
                         gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([shadowMapSize / 2, shadowMapSize / 2]));
                         gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapSize, shadowMapSize]));
@@ -2264,7 +2344,7 @@ async function main() {
                 gl.uniform2fv(lightingProgramUniforms.u_viewport, new Float32Array([innerWidth, innerHeight]));
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_projection, false, projectionMatrix);
                 gl.uniform2fv(lightingProgramUniforms.u_screenSize, new Float32Array([gl.canvas.width, gl.canvas.height]));
-                gl.uniform1i(lightingProgramUniforms.u_depthTextureLocation, depthFBO.texId);
+                gl.uniform1i(lightingProgramUniforms.u_depthTextureLocation, filteredDepthFBO.texId);
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_invProjection, false, invert4(projectionMatrix));
                 gl.uniformMatrix4fv(lightingProgramUniforms.u_invView, false, invert4(actualViewMatrix));
                 gl.uniform3fv(lightingProgramUniforms.u_lightPositions, lightPositions);
@@ -2311,7 +2391,7 @@ async function main() {
                 gl.blendEquation(gl.FUNC_ADD);
 
                 gl.enableVertexAttribArray(overlayProgramAttributes.a_uv);
-                gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
+                gl.bindBuffer(gl.ARRAY_BUFFER, quadUVBuffer);
                 gl.vertexAttribPointer(overlayProgramAttributes.a_uv, 2, gl.FLOAT, false, 0, 0);
                 gl.enableVertexAttribArray(overlayProgramAttributes.a_worldCenter);
                 gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
@@ -2322,9 +2402,20 @@ async function main() {
 
                 gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, numLights);
             } else {
-                // 2. If not in lighting mode, just draw scene with color shader (use mode to view depth FBO if specified)
+                // 2. If not in lighting mode, just draw scene with color shader
+                gl.useProgram(colorProgram);
+
                 gl.uniform1i(colorProgramUniforms.u_mode, currentMode);
                 gl.uniform1f(colorProgramUniforms.u_alphaThreshold, alphaThreshold);
+
+                gl.enableVertexAttribArray(colorProgramAttributes.a_position);
+                gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
+                gl.vertexAttribPointer(colorProgramAttributes.a_position, 2, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(colorProgramAttributes.a_index);
+                gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+                gl.vertexAttribIPointer(colorProgramAttributes.a_index, 1, gl.INT, false, 0, 0);
+                gl.vertexAttribDivisor(colorProgramAttributes.a_index, 1);
+
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
                 gl.clear(gl.COLOR_BUFFER_BIT);
@@ -2344,7 +2435,7 @@ async function main() {
                 gl.blendEquation(gl.FUNC_ADD);
 
                 gl.enableVertexAttribArray(overlayProgramAttributes.a_uv);
-                gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
+                gl.bindBuffer(gl.ARRAY_BUFFER, quadUVBuffer);
                 gl.vertexAttribPointer(overlayProgramAttributes.a_uv, 2, gl.FLOAT, false, 0, 0);
                 gl.enableVertexAttribArray(overlayProgramAttributes.a_worldCenter);
                 gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
