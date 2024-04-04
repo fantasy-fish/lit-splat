@@ -590,7 +590,6 @@ function createWorker(self) {
             depthIndex[starts0[sizeList[i]]++] = i;
 
         // console.timeEnd("sort");
-        // console.log(`sorted ${gaussianCount} gaussians`);
 
         lastProj = viewProj;
         self.postMessage({ depthIndex, viewProj, gaussianCount, label }, [
@@ -967,6 +966,63 @@ void main () {
     vUv = uv;
     gl_Position = clip_p;
 }
+`.trim();
+
+const cubeMapDebugFragmentSource = `
+#version 300 es
+precision highp float;
+
+uniform samplerCube overlayTexture;
+
+in vec2 vUv;
+
+out vec4 fragColor;
+
+void main () {
+    fragColor.rgb = vec3(0.0, 0.0, 0.2);
+
+	vec3 samplePos = vec3(0.0f);
+
+	// Crude statement to visualize different cube map faces based on UV coordinates
+	int x = int(floor(vUv.x / 0.25f));
+	int y = int(floor(vUv.y / (1.0 / 3.0)));
+	if (y == 1) {
+		vec2 uv = vec2(vUv.x * 4.0f, (vUv.y - 1.0/3.0) * 3.0);
+		uv = 2.0 * vec2(uv.x - float(x) * 1.0, uv.y) - 1.0;
+		switch (x) {
+			case 0:	// NEGATIVE_X
+				samplePos = vec3(-1.0f, uv.y, uv.x);
+				break;
+			case 1: // POSITIVE_Z
+				samplePos = vec3(uv.x, uv.y, 1.0f);
+				break;
+			case 2: // POSITIVE_X
+				samplePos = vec3(1.0, uv.y, -uv.x);
+				break;
+			case 3: // NEGATIVE_Z
+				samplePos = vec3(-uv.x, uv.y, -1.0f);
+				break;
+		}
+	} else {
+		if (x == 1) {
+			vec2 uv = vec2((vUv.x - 0.25) * 4.0, (vUv.y - float(y) / 3.0) * 3.0);
+			uv = 2.0 * uv - 1.0;
+			switch (y) {
+				case 0: // NEGATIVE_Y
+					samplePos = vec3(uv.x, -1.0f, uv.y);
+					break;
+				case 2: // POSITIVE_Y
+					samplePos = vec3(uv.x, 1.0f, -uv.y);
+					break;
+			}
+		}
+	}
+
+	if ((samplePos.x != 0.0f) && (samplePos.y != 0.0f)) {
+        fragColor = vec4(texture(overlayTexture, samplePos).r, 0., 0., 1.);
+	}
+}
+
 `.trim();
 
 const overlayFragmentSource = `
@@ -2273,6 +2329,31 @@ async function main() {
                 gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
                 gl.clear(gl.COLOR_BUFFER_BIT);
                 gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
+
+                // ... and draw the overlays too
+                gl.useProgram(overlayProgram);
+
+                gl.uniform1i(overlayProgramUniforms.u_texture, lightOverlayTexture.texId);
+                gl.uniformMatrix4fv(overlayProgramUniforms.u_projection, false, projectionMatrix);
+                gl.uniformMatrix4fv(overlayProgramUniforms.u_view, false, actualViewMatrix);
+                gl.uniform3fv(overlayProgramUniforms.u_worldCameraPosition, new Float32Array([inv2[12], inv2[13], inv2[14]]));
+                gl.uniform3fv(overlayProgramUniforms.u_worldCameraUp, new Float32Array([inv2[4], inv2[5], inv2[6]]));
+                gl.uniform2fv(overlayProgramUniforms.u_size, new Float32Array([0.2, 0.2]));
+                // Use normal over blending
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+                gl.blendEquation(gl.FUNC_ADD);
+
+                gl.enableVertexAttribArray(overlayProgramAttributes.a_uv);
+                gl.bindBuffer(gl.ARRAY_BUFFER, overlayQuadUVBuffer);
+                gl.vertexAttribPointer(overlayProgramAttributes.a_uv, 2, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(overlayProgramAttributes.a_worldCenter);
+                gl.bindBuffer(gl.ARRAY_BUFFER, lightOverlayCenterBuffer);
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, lightPositions);
+                const bytesPerOverlayCenter = 4 * 3;
+                gl.vertexAttribPointer(overlayProgramAttributes.a_worldCenter, 3, gl.FLOAT, false, bytesPerOverlayCenter, 0);
+                gl.vertexAttribDivisor(overlayProgramAttributes.a_worldCenter, 1);
+
+                gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, numLights);
             }
         } else {
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
