@@ -839,8 +839,11 @@ in vec2 position;
 in int index;
 
 out vec4 vColor;
+out vec3 vPBRColor;
 out vec2 vPosition;
 out vec3 vNormal;
+out float vRoughness;
+out float vMetallic;
 
 void main () {
     uvec4 bytes_00_15 = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}, uint(index) >> 10), 0);
@@ -885,8 +888,10 @@ void main () {
     vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
 
     uvec4 bytes_32_47 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 2u, uint(index) >> 10), 0);
+    uvec4 bytes_48_63 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 3u, uint(index) >> 10), 0);
     // TODO handle splat data without normals
     vNormal = normalize(vec3(uintBitsToFloat(bytes_32_47.xyz)));
+    uint opacity255 = (bytes_16_31.w >> 24) & 0xffu;
 
     if (mode == 0) {
         // Color mode
@@ -896,8 +901,17 @@ void main () {
                 (bytes_16_31.w) & 0xffu,
                 (bytes_16_31.w >> 8) & 0xffu,
                 (bytes_16_31.w >> 16) & 0xffu,
-                (bytes_16_31.w >> 24) & 0xffu
+                opacity255
             ) / 255.0;
+        vPBRColor =
+            clamp(pos2d.z/pos2d.w+1.0, 0.0, 1.0) *
+            vec3(
+                (bytes_32_47.w) & 0xffu,
+                (bytes_32_47.w >> 8) & 0xffu,
+                (bytes_32_47.w >> 16) & 0xffu
+            ) / 255.0;
+        vRoughness = uintBitsToFloat(bytes_48_63.x);
+        vMetallic = uintBitsToFloat(bytes_48_63.y);
     } else {
         // Depth mode
         // TODO(achan): We should compute the depth for each individual fragment based
@@ -911,7 +925,7 @@ void main () {
             depth,
             0.,
             length(cam.xyz),
-            float((bytes_16_31.w >> 24) & 0xffu) / 255.0
+            float(opacity255) / 255.0
         );
     }
     vPosition = position;
@@ -1000,8 +1014,11 @@ const lightingFragmentSource = `
 precision highp float;
 precision highp int;
 
+#define M_PI 3.1415926535897932384626433832795
+
 uniform vec2 screenSize;
 uniform int usePseudoNormals;
+uniform int usePBR;
 uniform sampler2D depthTexture;
 uniform mat4 invProjection, invView;
 uniform vec3 lightPositions[${MAX_LIGHTS}];
@@ -1015,6 +1032,9 @@ uniform float sigma_domain;
 in vec4 vColor;
 in vec2 vPosition;
 in vec3 vNormal;
+in vec3 vPBRColor;
+in float vMetallic;
+in float vRoughness;
 
 out vec4 fragColor;
 
@@ -1056,6 +1076,30 @@ float computeShadow(samplerCube shadowMap, vec3 lightToPoint) {
     return shadow;
 }
 
+vec3 computePBR(float radiance, vec3 normal, vec3 pointToLight, vec3 pointToCamera, vec3 albedo, float roughness, float metallic) {
+    vec3 halfVector = normalize(pointToLight + pointToCamera);
+    vec3 fd = (1. - metallic) * albedo / M_PI;
+
+    // D
+    float r2 = max(roughness * roughness, 0.0000001);
+    float amp = 1.0 / (r2 * M_PI);
+    float sharp = 2.0 / r2;
+    float D = amp * exp(sharp * (dot(halfVector, normal) - 1.0));
+
+    // F
+    vec3 F_0 = 0.04 * (1.0 - metallic) + albedo * metallic;
+    vec3 F = F_0 + (1.0f - F_0) * pow(1.0 - dot(halfVector, pointToCamera), 5.0);
+
+    r2 = pow(1.0 + roughness, 2.0) / 8.0;
+    float V =
+        (0.5 / max(dot(pointToLight, normal) * (1. - r2) + r2, 0.0000001)) *
+        (0.5 / max(dot(pointToCamera, normal) * (1. - r2) + r2, 0.0000001));
+    vec3 fs = D * F * V;
+    float transport = radiance * (2.0 * M_PI * dot(normal, pointToLight));
+
+    return (fd + fs) * transport;
+}
+
 void main () {
     float A = -dot(vPosition, vPosition);
     if (A < -4.0) discard;
@@ -1087,19 +1131,22 @@ void main () {
     vec4 world_p1 = invView * invProjection * clip_p1;
     vec4 world_p2 = invView * invProjection * clip_p2;
 
+    vec4 world_camera = invView * vec4(0., 0., 0., 1.);
+    vec3 pointToCamera = world_camera.xyz - world_p0.xyz;
+
     vec3 normal = vec3(0., 0., 0.);
     if (usePseudoNormals == 1) {
         normal = normalize(cross(world_p1.xyz - world_p0.xyz, world_p2.xyz - world_p0.xyz));
     } else {
         normal = vNormal;
     }
-    vec3 diffuse = vColor.rgb;
-    float ambient = 0.2;
+    vec3 albedo = vColor.rgb;
+    if (usePBR == 1) {
+        albedo = vPBRColor;
+    }
     vec3 result = vec3(0.0, 0.0, 0.0);
-    float totalIntensity = ambient;
     for (int i = 0; i < numLights; i++) {
         vec3 pointToLight = lightPositions[i] - world_p0.xyz;
-        float lightIntensity = max(dot(normal, normalize(pointToLight)), 0.0);
         float shadow = 0.;
         switch(i) {
         ${
@@ -1109,10 +1156,31 @@ void main () {
                 `case ${i}: shadow = computeShadow(shadowMaps[${i}], -pointToLight); break;`
             ).join("\n")
         }}
-        totalIntensity += lightIntensity * (1. - shadow);
+        float lightDistance = length(pointToLight);
+        float R = 4.0;
+        float attenuation = 1. / (pow(lightDistance / R, 2.) + 1.);
+        float radiance = (1. - shadow) * attenuation;
+        if (usePBR == 1) {
+            result += computePBR(
+                radiance, normal, normalize(pointToLight),
+                normalize(pointToCamera), albedo,
+                vRoughness, vMetallic
+            );
+        } else {
+            result += radiance * albedo * max(dot(normal, normalize(pointToLight)), 0.0);
+        }
+    }
+    if (usePBR == 1) {
+        // gamma correct
+        // TODO: this should use the learned gamma parameter from R3DG if available.
+        result = result / (result + vec3(1.0));
+        result = pow(result, vec3(1.0/2.2));
+    } else {
+        float ambient = 0.2;
+        result += ambient * albedo;
     }
 
-    fragColor = vec4(B * totalIntensity * diffuse, B);
+    fragColor = vec4(B * result, B);
 }
 
 `.trim();
@@ -1251,11 +1319,10 @@ async function main() {
     const depthHeight = 480;
     let depthFBO = createFBO(depthWidth, depthHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_2D);
 
-    const shadowMapWidth = 200;
-    const shadowMapHeight = 200;
+    const shadowMapSize = 400;
     let shadowMapFBOs = [];
     let lights = [];
-    const DUMMY_SHADOW_MAP_FBO = createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_CUBE_MAP);
+    const DUMMY_SHADOW_MAP_FBO = createFBO(shadowMapSize, shadowMapSize, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_CUBE_MAP);
 
     var lightPositions = new Float32Array(MAX_LIGHTS * 3); // Fixed length for easy upload to GPU
     var ndcSpaceLightBoundingBoxes = []; // At the end of each frame, is guaranteed to have `numLights` elements
@@ -1264,7 +1331,7 @@ async function main() {
     function addLight() {
         if (numLights >= MAX_LIGHTS) return;
         const i = numLights++;
-        shadowMapFBOs.push(createFBO(shadowMapWidth, shadowMapHeight, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_CUBE_MAP));
+        shadowMapFBOs.push(createFBO(shadowMapSize, shadowMapSize, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.TEXTURE_CUBE_MAP));
         const light = {
             position: null,
             faces: {},
@@ -1319,7 +1386,7 @@ async function main() {
                     break;
                 }
             }
-            light.faces[f].projMatrix = getProjectionMatrix(shadowMapWidth / 2, shadowMapHeight / 2, shadowMapWidth, shadowMapHeight);
+            light.faces[f].projMatrix = getProjectionMatrix(shadowMapSize / 2, shadowMapSize / 2, shadowMapSize, shadowMapSize);
             light.faces[f].viewProj = multiply4(light.faces[f].projMatrix, light.faces[f].viewMatrix);
             worker.postMessage({ view: light.faces[f].viewProj, label: `light-${i}-${f}` });
         }
@@ -1446,6 +1513,7 @@ async function main() {
         u_sigma_domain: gl.getUniformLocation(lightingProgram, "sigma_domain"),
         u_kernelSize: gl.getUniformLocation(lightingProgram, "kernelSize"),
         u_usePseudoNormals: gl.getUniformLocation(lightingProgram, "usePseudoNormals"),
+        u_usePBR: gl.getUniformLocation(lightingProgram, "usePBR"),
     };
     const sigma_range_step = 0.01;
     const sigma_domain_step = 1.0 / 640;
@@ -1454,6 +1522,7 @@ async function main() {
     let alphaThreshold = 0.0;
     let kernelSize = 0;
     let usePseudoNormals = 0;
+    let usePBR = 0;
     const lightingProgramAttributes = {
         a_position: gl.getAttribLocation(lightingProgram, "position"),
         a_index: gl.getAttribLocation(lightingProgram, "index"),
@@ -1612,6 +1681,10 @@ async function main() {
         if (["n", "N"].includes(e.key)) {
             usePseudoNormals = 1 - usePseudoNormals;
             console.log("usePseudoNormals:", usePseudoNormals);
+        }
+        if (["|", "\\"].includes(e.key)) {
+            usePBR = 1 - usePBR;
+            console.log("usePBR:", usePBR);
         }
         camid.innerText = "cam  " + currentCameraIndex;
         if (e.code == "KeyV") {
@@ -2111,8 +2184,8 @@ async function main() {
                     const shadowMapFBO = shadowMapFBOs[i];
                     for (let f = 0; f < 6; f++) {
                         gl.uniformMatrix4fv(colorProgramUniforms.u_view, false, light.faces[f].viewMatrix);
-                        gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([shadowMapWidth / 2, shadowMapHeight / 2]));
-                        gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapWidth, shadowMapHeight]));
+                        gl.uniform2fv(colorProgramUniforms.u_focal, new Float32Array([shadowMapSize / 2, shadowMapSize / 2]));
+                        gl.uniform2fv(colorProgramUniforms.u_viewport, new Float32Array([shadowMapSize, shadowMapSize]));
                         gl.uniformMatrix4fv(colorProgramUniforms.u_projection, false, light.faces[f].projMatrix);
                         gl.uniform1i(colorProgramUniforms.u_mode, MODES.DEPTH);
 
@@ -2126,7 +2199,7 @@ async function main() {
 
                         gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapFBO.fbo);
                         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, shadowMapFBO.texture, 0);
-                        gl.viewport(0, 0, shadowMapWidth, shadowMapHeight);
+                        gl.viewport(0, 0, shadowMapSize, shadowMapSize);
                         gl.clear(gl.COLOR_BUFFER_BIT);
                         gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, gaussianCount);
                     }
@@ -2159,6 +2232,7 @@ async function main() {
                 gl.uniform1f(lightingProgramUniforms.u_sigma_domain, sigma_domain);
                 gl.uniform1i(lightingProgramUniforms.u_kernelSize, kernelSize);
                 gl.uniform1i(lightingProgramUniforms.u_usePseudoNormals, usePseudoNormals);
+                gl.uniform1i(lightingProgramUniforms.u_usePBR, usePBR);
 
                 gl.enableVertexAttribArray(lightingProgramAttributes.a_position);
                 gl.bindBuffer(gl.ARRAY_BUFFER, gaussianQuadVertexBuffer);
