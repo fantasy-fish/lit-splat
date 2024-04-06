@@ -1,8 +1,3 @@
-function ceilPowerOfTwo(n) {
-    // Returns nearest power of two that is bigger than N
-    return Math.pow(2, Math.ceil(Math.log2(n)));
-}
-
 const PACKED_SPLAT_LENGTH = (
     3*4 +   // XYZ - Position (Float32)
     3*4 +   // XYZ - Scale (Float32)
@@ -26,9 +21,12 @@ const PACKED_RENDERABLE_SPLAT_LENGTH = (
             // ... padding
 );
 const BYTES_PER_TEXEL = 16; // RGBA32UI = 32 bits per channel * 4 channels = 4*4 bytes
-const TEXELS_PER_PACKED_SPLAT = ceilPowerOfTwo(Math.ceil(PACKED_RENDERABLE_SPLAT_LENGTH / BYTES_PER_TEXEL));
+const TEXELS_PER_PACKED_SPLAT = Math.ceil(PACKED_RENDERABLE_SPLAT_LENGTH / BYTES_PER_TEXEL);
 const PADDED_RENDERABLE_SPLAT_LENGTH = TEXELS_PER_PACKED_SPLAT * BYTES_PER_TEXEL;
-const PADDED_SPLAT_LENGTH = ceilPowerOfTwo(PACKED_SPLAT_LENGTH);
+const PADDED_SPLAT_LENGTH = 4 * Math.ceil(PACKED_SPLAT_LENGTH / 4);
+
+const PLY_MAGIC_HEADER = new Uint8Array([112, 108, 121, 10]); // "ply\n"
+const LSPLAT_MAGIC_HEADER = new Uint8Array([108, 115, 112, 108, 97, 116, 10]); // "lsplat\n"
 
 let cameras = [
     {
@@ -381,10 +379,6 @@ function translate4(a, x, y, z) {
 
 function createWorker(self) {
     // These constants all need to be redefined because of how the worker is created
-    function ceilPowerOfTwo(n) {
-        // Returns nearest power of two that is bigger than N
-        return Math.pow(2, Math.ceil(Math.log2(n)));
-    }
     const PACKED_SPLAT_LENGTH = (
         3*4 +   // XYZ - Position (Float32)
         3*4 +   // XYZ - Scale (Float32)
@@ -408,9 +402,9 @@ function createWorker(self) {
                 // ... padding
     );
     const BYTES_PER_TEXEL = 16; // RGBA32UI = 32 bits per channel * 4 channels = 4*4 bytes
-    const TEXELS_PER_PACKED_SPLAT = ceilPowerOfTwo(Math.ceil(PACKED_RENDERABLE_SPLAT_LENGTH / BYTES_PER_TEXEL));
+    const TEXELS_PER_PACKED_SPLAT = Math.ceil(PACKED_RENDERABLE_SPLAT_LENGTH / BYTES_PER_TEXEL);
     const PADDED_RENDERABLE_SPLAT_LENGTH = TEXELS_PER_PACKED_SPLAT * BYTES_PER_TEXEL;
-    const PADDED_SPLAT_LENGTH = ceilPowerOfTwo(PACKED_SPLAT_LENGTH);
+    const PADDED_SPLAT_LENGTH = 4 * Math.ceil(PACKED_SPLAT_LENGTH / 4);
     const FLOAT32_PER_PADDED_RENDERABLE_SPLAT = PADDED_RENDERABLE_SPLAT_LENGTH / 4;
     const UINT32_PER_PADDED_RENDERABLE_SPLAT = FLOAT32_PER_PADDED_RENDERABLE_SPLAT;
     const FLOAT32_PER_PADDED_SPLAT = PADDED_SPLAT_LENGTH / 4;
@@ -845,7 +839,7 @@ out float vRoughness;
 out float vMetallic;
 
 void main () {
-    uvec4 bytes_00_15 = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}, uint(index) >> 10), 0);
+    uvec4 bytes_00_15 = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) * uint(${TEXELS_PER_PACKED_SPLAT}), uint(index) >> 10), 0);
     vec4 cam = view * vec4(uintBitsToFloat(bytes_00_15.xyz), 1);
     vec4 pos2d = projection * cam;
 
@@ -855,7 +849,7 @@ void main () {
         return;
     }
 
-    uvec4 bytes_16_31 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 1u, uint(index) >> 10), 0);
+    uvec4 bytes_16_31 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) * uint(${TEXELS_PER_PACKED_SPLAT})) | 1u, uint(index) >> 10), 0);
     vec2    u1 = unpackHalf2x16(bytes_16_31.x),
             u2 = unpackHalf2x16(bytes_16_31.y),
             u3 = unpackHalf2x16(bytes_16_31.z);
@@ -886,8 +880,8 @@ void main () {
     vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
     vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
 
-    uvec4 bytes_32_47 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 2u, uint(index) >> 10), 0);
-    uvec4 bytes_48_63 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << ${Math.log2(TEXELS_PER_PACKED_SPLAT)}) | 3u, uint(index) >> 10), 0);
+    uvec4 bytes_32_47 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) * uint(${TEXELS_PER_PACKED_SPLAT})) | 2u, uint(index) >> 10), 0);
+    uvec4 bytes_48_63 = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) * uint(${TEXELS_PER_PACKED_SPLAT})) | 3u, uint(index) >> 10), 0);
     // TODO handle splat data without normals
     vNormal = normalize(vec3(uintBitsToFloat(bytes_32_47.xyz)));
     uint opacity255 = (bytes_16_31.w >> 24) & 0xffu;
@@ -1288,7 +1282,7 @@ async function main() {
         carousel = false;
     } catch (err) {}
     const url = new URL(
-        params.get("url") || "r3dg_lego_phase2.ply",
+        params.get("url") || "garden.lsplat",
         "https://huggingface.co/datasets/andrewkchan/lit-splat-data/resolve/main/"
     );
     const req = await fetch(url, {
@@ -1300,7 +1294,7 @@ async function main() {
         throw new Error(req.status + " Unable to load " + req.url);
 
     const reader = req.body.getReader();
-    let splatData = new Uint8Array(req.headers.get("content-length"));
+    let splatData = new Uint8Array(req.headers.get("content-length") - LSPLAT_MAGIC_HEADER.length);
 
     const downsample =
         splatData.length / PADDED_SPLAT_LENGTH > 500000 ? 1 : 1 / devicePixelRatio;
@@ -1691,14 +1685,17 @@ async function main() {
     worker.onmessage = (e) => {
         if (e.data.buffer) {
             splatData = new Uint8Array(e.data.buffer);
-            // const blob = new Blob([splatData.buffer], {
-            //     type: "application/octet-stream",
-            // });
-            // const link = document.createElement("a");
-            // link.download = "model.splat";
-            // link.href = URL.createObjectURL(blob);
-            // document.body.appendChild(link);
-            // link.click();
+            const exportedSplatData = new Uint8Array(LSPLAT_MAGIC_HEADER.length + splatData.length);
+            exportedSplatData.set(LSPLAT_MAGIC_HEADER, 0);
+            exportedSplatData.set(splatData, LSPLAT_MAGIC_HEADER.length);
+            const blob = new Blob([exportedSplatData.buffer], {
+                type: "application/octet-stream",
+            });
+            const link = document.createElement("a");
+            link.download = "model.lsplat";
+            link.href = URL.createObjectURL(blob);
+            document.body.appendChild(link);
+            link.click();
             worker.postMessage({
                 buffer: splatData.buffer,
                 gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
@@ -2491,18 +2488,23 @@ async function main() {
                 console.log("Loaded", Math.floor(splatData.length / PADDED_SPLAT_LENGTH));
 
                 if (
-                    splatData[0] == 112 &&
-                    splatData[1] == 108 &&
-                    splatData[2] == 121 &&
-                    splatData[3] == 10
+                    splatData.length >= PLY_MAGIC_HEADER.length &&
+                    PLY_MAGIC_HEADER.every((v, i) => splatData[i] === v)
                 ) {
-                    // ply file magic header means it should be handled differently
+                    // .ply file
                     worker.postMessage({ ply: splatData.buffer });
-                } else {
+                } else if (
+                    splatData.length >= LSPLAT_MAGIC_HEADER.length &&
+                    LSPLAT_MAGIC_HEADER.every((v, i) => splatData[i] === v)
+                ) {
+                    splatData = splatData.subarray(LSPLAT_MAGIC_HEADER.length);
+                    // .lsplat file
                     worker.postMessage({
                         buffer: splatData.buffer,
                         gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
                     });
+                } else {
+                    throw new Error("Unsupported file format");
                 }
             };
             fr.readAsArrayBuffer(file);
@@ -2529,64 +2531,34 @@ async function main() {
         selectFile(e.dataTransfer.files[0]);
     });
 
-    // TODO delete the old streaming .splat read code?
-    const useOldSplatStreamingDoesNotWorkWithPLY = false;
-    if (useOldSplatStreamingDoesNotWorkWithPLY) {
-        let bytesRead = 0;
-        let lastGaussianCount = -1;
-        let stopLoading = false;
+    let bytesRead = 0;
+    let lastGaussianCount = -1;
+    let stopLoading = false;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done || stopLoading) break;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done || stopLoading) break;
 
-            splatData.set(value, bytesRead);
-            bytesRead += value.length;
-
-            if (gaussianCount > lastGaussianCount) {
-                worker.postMessage({
-                    buffer: splatData.buffer,
-                    gaussianCount: Math.floor(bytesRead / PADDED_SPLAT_LENGTH),
-                });
-                lastGaussianCount = gaussianCount;
-            }
+        if (bytesRead + value.length > LSPLAT_MAGIC_HEADER.length) {
+            splatData.set(value.subarray(Math.max(0, LSPLAT_MAGIC_HEADER.length - bytesRead)), Math.max(0, bytesRead - LSPLAT_MAGIC_HEADER.length));
         }
-        if (!stopLoading) {
+        bytesRead += value.length;
+
+        if (gaussianCount > lastGaussianCount) {
             worker.postMessage({
                 buffer: splatData.buffer,
                 gaussianCount: Math.floor(bytesRead / PADDED_SPLAT_LENGTH),
             });
-        }
-        addLight(); // add a light in after everything finishes loading
-    } else {
-        let bytesRead = 0;
-        let stopLoading = false;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done || stopLoading) break;
-
-            splatData.set(value, bytesRead);
-            bytesRead += value.length;
-        }
-        if (!stopLoading) {
-            if (
-                splatData[0] == 112 &&
-                splatData[1] == 108 &&
-                splatData[2] == 121 &&
-                splatData[3] == 10
-            ) {
-                // ply file magic header means it should be handled differently
-                worker.postMessage({ ply: splatData.buffer });
-            } else {
-                worker.postMessage({
-                    buffer: splatData.buffer,
-                    gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
-                });
-            }
-            addLight(); // add a light in after everything finishes loading
+            lastGaussianCount = gaussianCount;
         }
     }
+    if (!stopLoading) {
+        worker.postMessage({
+            buffer: splatData.buffer,
+            gaussianCount: Math.floor(bytesRead / PADDED_SPLAT_LENGTH),
+        });
+    }
+    addLight(); // add a light in after everything finishes loading
 }
 
 main().catch((err) => {
