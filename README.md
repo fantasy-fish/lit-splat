@@ -2,7 +2,11 @@
 
 A 3D Gaussian Splat viewer with dynamic lighting. Based on the [splat](https://github.com/antimatter15/splat) viewer by [antimatter15](https://github.com/antimatter15).
 
-https://github.com/andrewkchan/lit-splat/raw/main/garden_demo.mov
+
+
+https://github.com/andrewkchan/lit-splat/assets/8591901/f61c4633-4a1a-4bbb-80d5-e7f73044635c
+
+
 
 ## controls
 
