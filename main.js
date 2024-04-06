@@ -1861,7 +1861,6 @@ async function main() {
     let startX, startY, down;
     canvas.addEventListener("mousedown", (e) => {
         carousel = false;
-        e.preventDefault();
         startX = e.clientX;
         startY = e.clientY;
         const ndcX = 2.0 * (e.clientX / innerWidth) - 1.0;
