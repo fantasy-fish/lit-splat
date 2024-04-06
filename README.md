@@ -8,7 +8,7 @@ https://github.com/andrewkchan/lit-splat/assets/8591901/f61c4633-4a1a-4bbb-80d5-
 
 
 
-## controls
+## Controls
 
 movement (arrow keys)
 - left/right arrow keys to strafe side to side
@@ -50,3 +50,12 @@ other
 - press p to resume default animation
 - drag and drop .ply file to convert to .lsplat
 - drag and drop cameras.json to load cameras
+
+## Examples
+
+- https://andrewkchan.dev/lit-splat/?url=garden.lsplat
+- https://andrewkchan.dev/lit-splat/?url=lego.lsplat
+- https://andrewkchan.dev/lit-splat/?url=ship.lsplat
+- https://andrewkchan.dev/lit-splat/?url=mic.lsplat
+- https://andrewkchan.dev/lit-splat/?url=materials.lsplat
+- https://andrewkchan.dev/lit-splat/?url=chair.lsplat
