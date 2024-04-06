@@ -2,6 +2,8 @@
 
 A 3D Gaussian Splat viewer with dynamic lighting. Based on the [splat](https://github.com/antimatter15/splat) viewer by [antimatter15](https://github.com/antimatter15).
 
+https://github.com/andrewkchan/lit-splat/raw/main/garden_demo.mov
+
 ## controls
 
 movement (arrow keys)
