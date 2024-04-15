@@ -461,6 +461,7 @@ function createWorker(self) {
         var texdata = new Uint32Array(texwidth * texheight * 4); // 4 Uint32 components per pixel in RGBAUI
         var texdata_c = new Uint8Array(texdata.buffer);
         var texdata_f = new Float32Array(texdata.buffer);
+        var hasNormals = false;
 
         // Here we convert from a .splat file buffer into a texture
         // With a little bit more foresight perhaps this texture file
@@ -520,9 +521,15 @@ function createWorker(self) {
             texdata[UINT32_PER_PADDED_RENDERABLE_SPLAT * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
 
             // normal x, y, z
-            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 0] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 0];
-            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 1] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 1];
-            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 2] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 2];
+            var n_x = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 0];
+            var n_y = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 1];
+            var n_z = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 8 + 2];
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 0] = n_x;
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 1] = n_y;
+            texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 8 + 2] = n_z;
+            if (n_x != 0 || n_y != 0 || n_z != 0) {
+                hasNormals = true;
+            }
 
             // PBR base colors r, g, b
             texdata_c[4 * (FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 11) + 0] = u_buffer[PADDED_SPLAT_LENGTH * i + 4*11 + 0];
@@ -534,7 +541,7 @@ function createWorker(self) {
             texdata_f[FLOAT32_PER_PADDED_RENDERABLE_SPLAT * i + 12 + 1] = f_buffer[FLOAT32_PER_PADDED_SPLAT * i + 12 + 1];
         }
 
-        self.postMessage({ texdata, texwidth, texheight }, [texdata.buffer]);
+        self.postMessage({ texdata, texwidth, texheight, hasNormals }, [texdata.buffer]);
     }
 
     function runSort(viewProj, label) {
@@ -1664,7 +1671,7 @@ async function main() {
     // Enable blending
     gl.enable(gl.BLEND);
 
-    var currentMode = MODES.LIGHTING;
+    var currentMode = params.get('mode') == 'color' ? MODES.COLOR : MODES.LIGHTING;
 
     const resize = () => {
         projectionMatrix = getProjectionMatrix(
@@ -1701,7 +1708,7 @@ async function main() {
                 gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
             });
         } else if (e.data.texdata) {
-            const { texdata, texwidth, texheight } = e.data;
+            const { texdata, texwidth, texheight, hasNormals } = e.data;
             gl.activeTexture(gl.TEXTURE0 + gaussianDataTexture.texId);
             gl.bindTexture(gl.TEXTURE_2D, gaussianDataTexture.texture);
             gl.texImage2D(
@@ -1715,6 +1722,9 @@ async function main() {
                 gl.UNSIGNED_INT,
                 texdata,
             );
+            if (!hasNormals && !usePseudoNormals) {
+                usePseudoNormals = true;
+            }
         } else if (e.data.depthIndex) {
             const { depthIndex, label } = e.data;
             if (!label) {
@@ -2496,7 +2506,7 @@ async function main() {
                     splatData.length >= LSPLAT_MAGIC_HEADER.length &&
                     LSPLAT_MAGIC_HEADER.every((v, i) => splatData[i] === v)
                 ) {
-                    splatData = splatData.subarray(LSPLAT_MAGIC_HEADER.length);
+                    splatData = splatData.slice(LSPLAT_MAGIC_HEADER.length);
                     // .lsplat file
                     worker.postMessage({
                         buffer: splatData.buffer,
