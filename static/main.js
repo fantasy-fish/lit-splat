@@ -1692,6 +1692,7 @@ async function main() {
     worker.onmessage = (e) => {
         if (e.data.buffer) {
             splatData = new Uint8Array(e.data.buffer);
+            /*
             const exportedSplatData = new Uint8Array(LSPLAT_MAGIC_HEADER.length + splatData.length);
             exportedSplatData.set(LSPLAT_MAGIC_HEADER, 0);
             exportedSplatData.set(splatData, LSPLAT_MAGIC_HEADER.length);
@@ -1703,6 +1704,7 @@ async function main() {
             link.href = URL.createObjectURL(blob);
             document.body.appendChild(link);
             link.click();
+            */
             worker.postMessage({
                 buffer: splatData.buffer,
                 gaussianCount: Math.floor(splatData.length / PADDED_SPLAT_LENGTH),
